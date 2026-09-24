@@ -98,19 +98,23 @@ async function createPendingGoogleAuth(mode, claimOverrides = {}) {
 
   const response = {
     headers: {},
+    body: null,
     redirect(_status, location) {
       this.location = location;
     },
     setHeader(name, value) {
       this.headers[name] = value;
     },
+    json(value) {
+      this.body = value;
+    },
   };
   await startGoogleAuth({ headers: {} }, response, mode);
-  const redirect = new URL(response.location);
+  const redirect = new URL(response.location || response.body?.authUrl);
   const state = redirect.searchParams.get("state");
   nonce = redirect.searchParams.get("nonce");
   const cookie = response.headers["Set-Cookie"].split(";", 1)[0];
-  return { state, cookie, close: discoveryServer.close };
+  return { state, cookie, response, close: discoveryServer.close };
 }
 
 async function completeGoogleAuth(pending) {
@@ -153,6 +157,21 @@ test("Google login is disabled until enabled, clientId, clientSecret and redirec
     },
   });
   assert.equal(isGoogleLoginEnabled(), true);
+});
+
+test("Google account linking can return an authorization URL to an authenticated API caller", async () => {
+  const pending = await createPendingGoogleAuth({
+    mode: "link",
+    linkUserId: 42,
+    returnUrl: true,
+  });
+  try {
+    assert.match(pending.response.body?.authUrl || "", /^http/);
+    assert.equal(pending.response.location, undefined);
+    assert.ok(pending.cookie.startsWith("aurral_google_transaction="));
+  } finally {
+    await pending.close();
+  }
 });
 
 test("logging in with an unrecognized Google identity is rejected and never provisions an account", async () => {

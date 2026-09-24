@@ -1,19 +1,16 @@
 import { useEffect, useState } from "react";
-import { getMyIdentities, unlinkMyIdentity } from "../../../utils/api/endpoints/auth.js";
+import {
+  getMyIdentities,
+  startGoogleLink,
+  unlinkMyIdentity,
+} from "../../../utils/api/endpoints/auth.js";
 import { isReauthRequiredError, promptReauth } from "../../../utils/reauth.js";
 import { useAuth } from "../../../contexts/AuthContext";
-import { getAppBasePath } from "../../../utils/basePath.js";
 
 const PROVIDER_LABELS = {
   oidc: "Single sign-on",
   google: "Google",
   plex: "Plex",
-};
-
-const buildApiUrl = (path) => {
-  const basePath = getAppBasePath();
-  const prefix = basePath === "/" ? "" : basePath.replace(/\/$/, "");
-  return `${prefix}${path}`;
 };
 
 export function ConnectedAccountsSection({ showSuccess, showError, className = "" }) {
@@ -73,7 +70,16 @@ export function ConnectedAccountsSection({ showSuccess, showError, className = "
   const handleConnectGoogle = async () => {
     const shouldProceed = await promptReauth();
     if (!shouldProceed) return;
-    window.location.assign(buildApiUrl("/api/auth/google/link"));
+    try {
+      const result = await startGoogleLink();
+      if (!result?.authUrl) throw new Error("Google did not return an authorization URL");
+      window.location.assign(result.authUrl);
+    } catch (err) {
+      showError?.(
+        err.response?.data?.message || err.response?.data?.error || err.message ||
+          "Failed to connect Google",
+      );
+    }
   };
 
   if (loading) return null;

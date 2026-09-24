@@ -141,6 +141,10 @@ export async function startGoogleAuth(req, res, mode) {
 
   const redirectTo = client.buildAuthorizationUrl(oidc, parameters);
   setTransactionCookie(req, res, transactionId);
+  if (mode.returnUrl) {
+    res.json({ authUrl: redirectTo.href });
+    return;
+  }
   res.redirect(302, redirectTo.href);
 }
 

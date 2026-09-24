@@ -587,6 +587,37 @@ test("a queued discovery adoption cannot seed downloads for a suspended owner", 
   }
 });
 
+test("download pipeline work is deferred while its playlist owner is suspended", async () => {
+  const owner = userOps.createUser("suspended-pipeline-owner", "unused", "user");
+  const flow = flowPlaylistConfig.createFlow({
+    name: "Suspended Pipeline",
+    mix: { discover: 100, mix: 0, trending: 0, focus: 0 },
+    size: 1,
+    scheduleDays: [1],
+    ownerUserId: owner.id,
+  });
+  const jobId = downloadTracker.addJob(
+    { artistName: "Artist", trackName: "Track" },
+    flow.id,
+  );
+  userOps.updateUser(owner.id, { status: "suspended" });
+  const { processPipelinePayload } = await importFromRepo(
+    "backend/services/slskdOrchestrator.js",
+  );
+
+  const payload = { phase: "search", source: "slskd", jobId };
+  assert.deepEqual(await processPipelinePayload(payload), {
+    ...payload,
+    delaySeconds: 30,
+  });
+
+  userOps.updateUser(owner.id, { status: "active" });
+  const { isPlaylistOwnerActive } = await importFromRepo(
+    "backend/services/weeklyFlow/weeklyFlowOwnerStatus.js",
+  );
+  assert.equal(isPlaylistOwnerActive(flow.id), true);
+});
+
 test("flow operation tokens are stored separately for each playlist", () => {
   markLatestWeeklyFlowOperationToken("flow:one", "first");
   markLatestWeeklyFlowOperationToken("flow:two", "second");

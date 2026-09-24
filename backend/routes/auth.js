@@ -170,6 +170,21 @@ router.get("/google/link", requireAuth, requireRecentAuth(), async (req, res) =>
   }
 });
 
+router.post("/google/link/start", requireAuth, requireRecentAuth(), async (req, res) => {
+  try {
+    await startGoogleAuth(req, res, {
+      mode: "link",
+      linkUserId: req.user.id,
+      returnUrl: true,
+    });
+  } catch (error) {
+    logger.error("auth", "Google link start failed:", { message: error.message });
+    if (!res.headersSent) {
+      res.status(500).json({ error: "Google link failed" });
+    }
+  }
+});
+
 router.post("/google/exchange", (req, res) => {
   try {
     const result = exchangeGoogleCallback(req.body?.code, req);
