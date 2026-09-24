@@ -725,7 +725,7 @@ test("OIDC login does not adopt the protected bootstrap admin", async () => {
   }
 });
 
-test("OIDC login rejects a suspended user and never overwrites a protected account's role", async () => {
+test("OIDC login owns role changes, preserves local permissions, and protects recovery accounts", async () => {
   let issuer;
   let nonce;
   const discoveryServer = await createMockHttpServer((request, response) => {
@@ -789,15 +789,37 @@ test("OIDC login rejects a suspended user and never overwrites a protected accou
     assert.equal(user?.role, "user");
     assert.equal(userOps.getUserById(user.id)?.roleSource, "oidc");
 
+    const localPermissions = {
+      accessSettings: false,
+      accessFlow: true,
+      requestDownloads: false,
+    };
+    userOps.updateUser(user.id, {
+      role: "admin",
+      roleSource: "local",
+      permissions: localPermissions,
+    });
+    const storedLocalPermissions = userOps.getUserById(user.id)?.permissions;
+    const demotedByOidc = await login();
+    assert.equal(demotedByOidc?.role, "user");
+    assert.equal(userOps.getUserById(user.id)?.roleSource, "oidc");
+    assert.deepEqual(userOps.getUserById(user.id)?.permissions, storedLocalPermissions);
+
     process.env.OIDC_ADMIN_USERS = "callback-user";
+    userOps.updateUser(user.id, { role: "user", roleSource: "local" });
+    const promotedByOidc = await login();
+    assert.equal(promotedByOidc?.role, "admin");
+    assert.equal(userOps.getUserById(user.id)?.roleSource, "oidc");
+    assert.deepEqual(userOps.getUserById(user.id)?.permissions, storedLocalPermissions);
+
     userOps.setProtected(user.id, true);
+    delete process.env.OIDC_ADMIN_USERS;
     const loggedInAgain = await login();
     assert.equal(
       loggedInAgain?.role,
-      "user",
-      "OIDC must never promote or otherwise change a protected account's role",
+      "admin",
+      "OIDC must never demote or otherwise change a protected account's role",
     );
-    delete process.env.OIDC_ADMIN_USERS;
 
     userOps.updateUser(user.id, { status: "suspended" });
     await assert.rejects(() => login(), {

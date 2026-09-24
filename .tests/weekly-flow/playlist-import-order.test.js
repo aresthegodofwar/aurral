@@ -555,6 +555,38 @@ test("a queued flow stops before mutation when its owner becomes suspended", asy
   }
 });
 
+test("a queued discovery adoption cannot seed downloads for a suspended owner", async () => {
+  const originalSeed = weeklyFlowWorker.seedFlowRunWithTracks;
+  let seedCalls = 0;
+  try {
+    const owner = userOps.createUser("suspended-adoption-owner", "unused", "user");
+    const flow = flowPlaylistConfig.createFlow({
+      name: "Adopted Before Suspension",
+      mix: { discover: 100, mix: 0, trending: 0, focus: 0 },
+      size: 1,
+      scheduleDays: [1],
+      ownerUserId: owner.id,
+    });
+    weeklyFlowWorker.seedFlowRunWithTracks = async () => {
+      seedCalls += 1;
+      return { tracksQueued: 1 };
+    };
+    userOps.updateUser(owner.id, { status: "suspended" });
+
+    const result = await processWeeklyFlowOperation({
+      kind: "adopt-flow-seed",
+      flowId: flow.id,
+      tracks: [{ artistName: "Artist", trackName: "Track" }],
+    });
+
+    assert.deepEqual(result, { skipped: true, inactiveOwner: true });
+    assert.equal(seedCalls, 0);
+  } finally {
+    weeklyFlowWorker.seedFlowRunWithTracks = originalSeed;
+    weeklyFlowWorker.stop();
+  }
+});
+
 test("flow operation tokens are stored separately for each playlist", () => {
   markLatestWeeklyFlowOperationToken("flow:one", "first");
   markLatestWeeklyFlowOperationToken("flow:two", "second");

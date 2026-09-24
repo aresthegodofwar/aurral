@@ -820,6 +820,22 @@ export function SettingsUsersTab({
                                   onChange={(event) => setEditPassword(event.target.value)}
                                 />
                               </SettingsArrFormGroup>
+                              <SettingsArrFormGroup
+                                label="Role"
+                                help={
+                                  editUser.roleSource === "oidc"
+                                    ? "Managed by OIDC; local changes will be overwritten"
+                                    : undefined
+                                }
+                              >
+                                <span
+                                  className={`arr-badge${
+                                    editUser.role === "admin" ? " arr-badge--admin" : ""
+                                  }`}
+                                >
+                                  {editUser.role}
+                                </span>
+                              </SettingsArrFormGroup>
                               <SettingsArrFormGroup label="Permissions" size="large">
                                 <PermissionChecklist
                                   permissions={editPermissions}

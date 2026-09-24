@@ -393,10 +393,17 @@ async function adoptFlowSeed({ flowId, tracks = [] } = {}) {
   const safeFlowId = String(flowId || "").trim();
   const flow = flowPlaylistConfig.getFlow(safeFlowId);
   if (!flow) return { missing: true };
+  if (!isOwnerActive(flow.ownerUserId)) return { skipped: true, inactiveOwner: true };
   const normalizedTracks = normalizeTrackList(tracks);
-  const result = await withPlaylistMutation(safeFlowId, async () =>
-    weeklyFlowWorker.seedFlowRunWithTracks(safeFlowId, flow, normalizedTracks),
-  );
+  const result = await withPlaylistMutation(safeFlowId, async () => {
+    const latestFlow = flowPlaylistConfig.getFlow(safeFlowId);
+    if (!latestFlow) return { missing: true };
+    if (!isOwnerActive(latestFlow.ownerUserId)) {
+      return { skipped: true, inactiveOwner: true };
+    }
+    return weeklyFlowWorker.seedFlowRunWithTracks(safeFlowId, latestFlow, normalizedTracks);
+  });
+  if (result?.skipped || result?.missing) return result;
   await wakeDownloadWorker();
   recordFlowTracksGenerated({
     flowId: safeFlowId,
