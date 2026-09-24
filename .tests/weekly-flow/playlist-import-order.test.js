@@ -13,7 +13,7 @@ import {
 const [
   isolatedState,
   { db },
-  { dbOps },
+  { dbOps, userOps },
   trackerModule,
   playlistConfigModule,
   operationsModule,
@@ -503,6 +503,51 @@ test("a failed flow plan leaves the current playlist and jobs untouched", async 
     );
     assert.equal(resets, 0);
     assert.ok(downloadTracker.getJob(jobId));
+  } finally {
+    playlistSource.buildFlowRunPlan = originalBuildPlan;
+    playlistManager.weeklyReset = originalReset;
+    weeklyFlowWorker.stop();
+  }
+});
+
+test("a queued flow stops before mutation when its owner becomes suspended", async () => {
+  const originalBuildPlan = playlistSource.buildFlowRunPlan;
+  const originalReset = playlistManager.weeklyReset;
+  let resets = 0;
+  try {
+    dbOps.updateSettings({
+      ...dbOps.getSettings(),
+      integrations: {
+        lastfm: { apiKey: "test" },
+        slskd: { enabled: true, url: "http://slskd", apiKey: "test" },
+      },
+    });
+    const owner = userOps.createUser("queued-flow-owner", "unused", "user");
+    const flow = flowPlaylistConfig.createFlow({
+      name: "Queued Before Suspension",
+      mix: { discover: 100, mix: 0, trending: 0, focus: 0 },
+      size: 1,
+      scheduleDays: [1],
+      ownerUserId: owner.id,
+    });
+    flowPlaylistConfig.setEnabled(flow.id, true);
+    playlistSource.buildFlowRunPlan = async () => {
+      userOps.updateUser(owner.id, { status: "suspended" });
+      return {
+        primaryTracks: [],
+        reserveTracks: [],
+        diagnostics: { targets: { primary: 0 }, achieved: { primary: 0, reserve: 0 } },
+      };
+    };
+    playlistManager.weeklyReset = async () => { resets += 1; };
+
+    const result = await processWeeklyFlowOperation({
+      kind: "scheduled-flow-refresh",
+      flowId: flow.id,
+    });
+
+    assert.deepEqual(result, { skipped: true, inactiveOwner: true });
+    assert.equal(resets, 0);
   } finally {
     playlistSource.buildFlowRunPlan = originalBuildPlan;
     playlistManager.weeklyReset = originalReset;

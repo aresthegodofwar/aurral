@@ -335,9 +335,6 @@ router.patch("/:id", requireAuth, async (req, res) => {
         });
       }
       updates.status = status;
-      if (status !== "active") {
-        deleteSessionsByUserId(id);
-      }
     }
     if (allowIdentityAdoption !== undefined) {
       if (allowIdentityAdoption && !existing.needsIdentityMigration) {
@@ -370,6 +367,10 @@ router.patch("/:id", requireAuth, async (req, res) => {
       });
     }
     const updated = userOps.updateUser(id, updates);
+    if (updates.status && updates.status !== "active") {
+      deleteSessionsByUserId(id);
+      websocketService.disconnectUser(id);
+    }
     reconcileLocalBypassAfterUserMutation();
     res.json(updated);
   } catch (e) {
