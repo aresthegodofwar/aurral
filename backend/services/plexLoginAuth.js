@@ -106,15 +106,28 @@ export async function completePlexLogin(req, res) {
     return;
   }
 
-  pendingLogins.delete(transactionId);
-  clearTransactionCookie(req, res);
-
-  const identity = await PlexClient.validateToken(token, pending.clientId);
+  let identity;
+  try {
+    identity = await PlexClient.validateToken(token, pending.clientId, {
+      throwOnTransient: true,
+    });
+  } catch {
+    res.status(503).json({
+      error: "Plex account validation is temporarily unavailable",
+      retryable: true,
+    });
+    return;
+  }
   const subject = identity?.id != null ? String(identity.id) : null;
   if (!subject) {
+    pendingLogins.delete(transactionId);
+    clearTransactionCookie(req, res);
     res.status(400).json({ error: "Could not verify the Plex account" });
     return;
   }
+
+  pendingLogins.delete(transactionId);
+  clearTransactionCookie(req, res);
 
   const linked = userIdentityOps.findByProvider("plex", "plex", subject);
   if (!linked) {

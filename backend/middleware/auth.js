@@ -632,7 +632,7 @@ export function resolveRequestUser(req) {
       const username = colon >= 0 ? decoded.slice(0, colon) : decoded;
       const password = colon >= 0 ? decoded.slice(colon + 1) : "";
       let user = resolveUser(username, password);
-      if (!user) user = legacyAuth(username, password);
+      if (!user && userOps.countUsers() === 0) user = legacyAuth(username, password);
       if (user) return user;
     } catch (e) {
       return null;

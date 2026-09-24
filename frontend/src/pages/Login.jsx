@@ -86,6 +86,7 @@ const Login = () => {
           result = res;
           break;
         } catch (err) {
+          if (err.response?.data?.retryable) continue;
           if (popup && !popup.closed) popup.close();
           setError(
             err.response?.data?.message ||
