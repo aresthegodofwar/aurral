@@ -4,6 +4,7 @@ import { useAuth } from "../contexts/AuthContext";
 import { setStoredAuth } from "../utils/api/core.js";
 import { exchangeOidcCode, exchangeGoogleCode } from "../utils/api/endpoints/auth.js";
 import { useDocumentTitle } from "../hooks/useDocumentTitle";
+import { DotLoader } from "../components/DotLoader";
 
 const readHashParams = () => {
   const hash = String(window.location.hash || "").replace(/^#/, "");
@@ -78,25 +79,36 @@ const SsoComplete = () => {
 
   if (error) {
     return (
-      <div className="login-page">
+      <main className="login-page sso-complete-page">
         <div className="login-card">
           <div className="login-header">
             <img src="/arralogo.svg" alt="Aurral" className="login-logo" />
             <h1 className="login-title">Sign-in failed</h1>
-            <p className="login-subtitle">{error}</p>
+            <p className="login-subtitle login-subtitle--error" role="alert">
+              {error}
+            </p>
           </div>
-          <p className="login-error">
+          <p className="sso-complete-error">
             <Link to="/">Back to sign in</Link>
           </p>
         </div>
-      </div>
+      </main>
     );
   }
 
   return (
-    <div className="app-loading app-loading--screen">
-      <div className="app-loading__spinner app-loading__spinner--lg" />
-    </div>
+    <main className="login-page sso-complete-page">
+      <div className="login-card sso-complete-card">
+        <div className="login-header">
+          <img src="/arralogo.svg" alt="Aurral" className="login-logo" />
+          <h1 className="login-title">Signing you in</h1>
+          <p className="login-subtitle" role="status" aria-live="polite">
+            Completing your SSO session…
+          </p>
+        </div>
+        <DotLoader size="sm" label="Completing sign-in" className="sso-complete-loader" />
+      </div>
+    </main>
   );
 };
 

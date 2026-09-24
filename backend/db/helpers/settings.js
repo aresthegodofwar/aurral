@@ -9,13 +9,7 @@ import {
   syncDownloadFolderPath,
   validateDownloadFolderPath,
 } from "../../services/downloadFolderConfig.js";
-import {
-  normalizeM3uPathMappings,
-  normalizeM3uPathMode,
-  syncM3uPathMappings,
-  syncM3uPathMode,
-} from "../../services/playlistM3uPaths.js";
-import { normalizeExistingFileMode } from "../../services/weeklyFlow/weeklyFlowFileReuse.js";
+import { normalizeExistingFileMode } from "../../services/weeklyFlow/weeklyFlowFileReuseMode.js";
 import { normalizeDateTimeFormat } from "../../config/constants.js";
 import { normalizeQualityProfile } from "../../services/qualityProfileModel.js";
 
@@ -84,7 +78,18 @@ let settingsCache = null;
 let settingsCacheTime = 0;
 const SETTINGS_CACHE_TTL = 60000;
 
+const normalizeLidarrRootFolderPaths = (paths) => [...new Set(
+  (Array.isArray(paths) ? paths : [])
+    .map((value) => String(value || "").trim())
+    .filter(Boolean),
+)];
+
 export const dbOps = {
+  invalidateSettingsCache() {
+    settingsCache = null;
+    settingsCacheTime = 0;
+  },
+
   getJSONSetting(key) {
     return dbHelpers.parseJSON(getSettingStmt.get(key)?.value) || null;
   },
@@ -104,9 +109,30 @@ export const dbOps = {
     );
   },
 
+  setLidarrRootFolderPaths(paths) {
+    const settings = dbOps.getSettings();
+    const normalized = normalizeLidarrRootFolderPaths(paths);
+    const currentIntegrations = settings.integrations || {};
+    const currentLidarr = currentIntegrations.lidarr || {};
+    if (JSON.stringify(currentLidarr.rootFolderPaths || []) === JSON.stringify(normalized)) {
+      return normalized;
+    }
+    dbOps.updateSettings({
+      integrations: {
+        ...currentIntegrations,
+        lidarr: {
+          ...currentLidarr,
+          rootFolderPaths: normalized,
+        },
+      },
+    });
+    return normalized;
+  },
+
   getSettings() {
     const now = Date.now();
-    if (settingsCache && now - settingsCacheTime < SETTINGS_CACHE_TTL) {
+    const cacheTtl = process.env.AURRAL_BACKGROUND_WORKER_GROUP ? 2000 : SETTINGS_CACHE_TTL;
+    if (settingsCache && now - settingsCacheTime < cacheTtl) {
       return settingsCache;
     }
 
@@ -137,6 +163,7 @@ export const dbOps = {
     const sharedPlaylists = readStoredSettingJson("sharedPlaylists", [
       "sharedFlowPlaylists",
     ]);
+    const subsonic = readStoredSettingJson("subsonic") || {};
     const playlistWorker = normalizePlaylistWorkerSettings(
       readStoredSettingJson("playlistWorker", ["weeklyFlowWorker"]),
     );
@@ -180,6 +207,9 @@ export const dbOps = {
       releaseTypes: releaseTypes || [],
       flows: flows || null,
       sharedPlaylists: sharedPlaylists || null,
+      subsonic: {
+        favoriteAutoKeep: subsonic.favoriteAutoKeep !== false,
+      },
       playlistWorker,
       playlistArtwork,
       inbox: {
@@ -197,15 +227,9 @@ export const dbOps = {
       onboardingComplete: !!onboardingComplete,
     };
     if (result.integrations?.navidrome) {
-      result.integrations.navidrome.m3uPathMode = normalizeM3uPathMode(
-        result.integrations.navidrome.m3uPathMode,
-      );
-      result.integrations.navidrome.pathMappings = normalizeM3uPathMappings(
-        result.integrations.navidrome.pathMappings,
-      );
+      delete result.integrations.navidrome.m3uPathMode;
+      delete result.integrations.navidrome.pathMappings;
     }
-    syncM3uPathMode(result.integrations?.navidrome?.m3uPathMode);
-    syncM3uPathMappings(result.integrations?.navidrome?.pathMappings);
     settingsCache = result;
     settingsCacheTime = Date.now();
     return result;
@@ -231,13 +255,9 @@ export const dbOps = {
         if (nextIntegrations.navidrome) {
           nextIntegrations.navidrome = {
             ...nextIntegrations.navidrome,
-            m3uPathMode: normalizeM3uPathMode(
-              nextIntegrations.navidrome.m3uPathMode,
-            ),
-            pathMappings: normalizeM3uPathMappings(
-              nextIntegrations.navidrome.pathMappings,
-            ),
           };
+          delete nextIntegrations.navidrome.m3uPathMode;
+          delete nextIntegrations.navidrome.pathMappings;
         }
         upsertSettingStmt.run(
           "integrations",
@@ -245,8 +265,6 @@ export const dbOps = {
             encryptIntegrations(nextIntegrations, encKey)
           )
         );
-        syncM3uPathMode(nextIntegrations?.navidrome?.m3uPathMode);
-        syncM3uPathMappings(nextIntegrations?.navidrome?.pathMappings);
       }
       if (settings.quality) {
         upsertSettingStmt.run("quality", settings.quality);
@@ -336,6 +354,14 @@ export const dbOps = {
         upsertSettingStmt.run(
           "sharedPlaylists",
           dbHelpers.stringifyJSON(settings.sharedPlaylists),
+        );
+      }
+      if (settings.subsonic !== undefined) {
+        upsertSettingStmt.run(
+          "subsonic",
+          dbHelpers.stringifyJSON({
+            favoriteAutoKeep: settings.subsonic.favoriteAutoKeep !== false,
+          }),
         );
       }
       if (settings.playlistWorker !== undefined) {

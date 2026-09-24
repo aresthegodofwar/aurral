@@ -16,11 +16,26 @@ const [isolatedState, honkerDbModule, refreshScheduler, discoveryIndex] =
 
 const {
   discoveryNeedsRefresh,
+  bootstrapDiscoveryRefresh,
   enqueueDiscoveryRefresh,
-  markDiscoveryRefreshDequeued,
+  enqueueDiscoveryRefreshIfNeeded,
+  recoverDeadDiscoveryRefresh,
   scheduleNextDiscoveryRefresh,
 } = refreshScheduler;
 const { getDiscoveryCache } = discoveryIndex;
+const { db } = await importFromRepo("backend/config/db-sqlite.js");
+const originalLastfmApiKey = process.env.LASTFM_API_KEY;
+
+function seedLibraryArtist() {
+  db.prepare(
+    `INSERT INTO library_artists (identity_key, name, created_at, updated_at)
+     VALUES ('test:seed-artist', 'Seed Artist', 1, 1)`,
+  ).run();
+}
+
+function clearLibraryArtists() {
+  db.prepare("DELETE FROM library_artists").run();
+}
 
 let heldGlobalRefreshLock = null;
 
@@ -68,15 +83,37 @@ function countDiscoveryRefreshJobs() {
   );
 }
 
+function discoveryRefreshPayloads() {
+  return honkerDbModule
+    .getHonkerDb()
+    .query("SELECT payload FROM _honker_live WHERE queue = ? ORDER BY id", [
+      "discovery-refresh",
+    ])
+    .map((row) => JSON.parse(row.payload));
+}
+
+function setDiscoveryCache(overrides = {}) {
+  Object.assign(getDiscoveryCache(), {
+    recommendations: [],
+    globalTop: [],
+    topGenres: [],
+    lastUpdated: null,
+    isUpdating: false,
+    ...overrides,
+  });
+}
+
 test.beforeEach(() => {
-  markDiscoveryRefreshDequeued();
-  getDiscoveryCache().isUpdating = false;
+  clearDiscoveryRefreshJobs();
+  setDiscoveryCache();
   releaseHeldGlobalRefreshLock();
+  clearLibraryArtists();
 });
 
 test.after(async () => {
+  if (originalLastfmApiKey === undefined) delete process.env.LASTFM_API_KEY;
+  else process.env.LASTFM_API_KEY = originalLastfmApiKey;
   releaseHeldGlobalRefreshLock();
-  markDiscoveryRefreshDequeued();
   await cleanupIsolatedState(isolatedState);
 });
 
@@ -91,6 +128,59 @@ test("discoveryNeedsRefresh returns true when cache is empty", () => {
   );
 });
 
+test("discoveryNeedsRefresh retries a recent empty cache", () => {
+  assert.equal(
+    discoveryNeedsRefresh({
+      recommendations: [],
+      globalTop: [],
+      topGenres: [],
+      lastUpdated: new Date().toISOString(),
+    }),
+    true,
+  );
+});
+
+test("discoveryNeedsRefresh does not retry missing genres when the library has no artists", () => {
+  assert.equal(
+    discoveryNeedsRefresh({
+      recommendations: [],
+      globalTop: [{ id: "trend-1" }],
+      topGenres: [],
+      lastUpdated: new Date().toISOString(),
+    }),
+    false,
+  );
+});
+
+test("discoveryNeedsRefresh retries missing genres when the library has seed artists", () => {
+  seedLibraryArtist();
+  assert.equal(
+    discoveryNeedsRefresh({
+      recommendations: [{ id: "rec-1" }],
+      globalTop: [{ id: "trend-1" }],
+      topGenres: [],
+      lastUpdated: new Date().toISOString(),
+    }),
+    true,
+  );
+});
+
+test("interval check does not queue a refresh after a seedless run left genres empty", async () => {
+  process.env.LASTFM_API_KEY = "test-key";
+  setDiscoveryCache({
+    recommendations: [],
+    globalTop: [{ id: "trend-1" }],
+    topGenres: [],
+    lastUpdated: new Date().toISOString(),
+  });
+
+  const result = await enqueueDiscoveryRefreshIfNeeded({ reason: "interval" });
+
+  assert.equal(result.enqueued, false);
+  assert.equal(result.reason, "fresh");
+  assert.equal(countDiscoveryRefreshJobs(), 0);
+});
+
 test("discoveryNeedsRefresh returns false for fresh populated cache", () => {
   assert.equal(
     discoveryNeedsRefresh({
@@ -100,6 +190,76 @@ test("discoveryNeedsRefresh returns false for fresh populated cache", () => {
     }),
     false,
   );
+});
+
+test("first discovery startup queues one refresh", async () => {
+  process.env.LASTFM_API_KEY = "test-key";
+
+  await bootstrapDiscoveryRefresh();
+
+  const payloads = discoveryRefreshPayloads();
+  assert.equal(payloads.length, 1);
+  assert.equal(payloads[0].reason, "startup");
+  assert.equal(payloads[0].scheduleOnly, false);
+});
+
+test("recent empty discovery cache queues one recovery refresh", async () => {
+  process.env.LASTFM_API_KEY = "test-key";
+  setDiscoveryCache({
+    recommendations: [],
+    globalTop: [],
+    topGenres: [],
+    lastUpdated: new Date().toISOString(),
+  });
+
+  await bootstrapDiscoveryRefresh();
+  await bootstrapDiscoveryRefresh();
+
+  const payloads = discoveryRefreshPayloads();
+  assert.equal(payloads.length, 1);
+  assert.equal(payloads[0].reason, "startup");
+  assert.equal(payloads[0].scheduleOnly, false);
+});
+
+test("stale and incomplete discovery caches retry", async () => {
+  process.env.LASTFM_API_KEY = "test-key";
+  setDiscoveryCache({
+    recommendations: [{ id: "old" }],
+    topGenres: ["rock"],
+    lastUpdated: new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString(),
+  });
+
+  await bootstrapDiscoveryRefresh();
+  assert.equal(discoveryRefreshPayloads()[0].reason, "startup");
+
+  clearDiscoveryRefreshJobs();
+  setDiscoveryCache({ recommendations: [{ id: "partial" }] });
+
+  await bootstrapDiscoveryRefresh();
+  assert.equal(discoveryRefreshPayloads()[0].reason, "startup");
+});
+
+test("repeated startup checks do not create duplicate active refresh jobs", async () => {
+  process.env.LASTFM_API_KEY = "test-key";
+  setDiscoveryCache({ lastUpdated: null });
+
+  await bootstrapDiscoveryRefresh();
+  await bootstrapDiscoveryRefresh();
+
+  assert.equal(countDiscoveryRefreshJobs(), 1);
+});
+
+test("a completed discovery queue job no longer blocks the next refresh", () => {
+  process.env.LASTFM_API_KEY = "test-key";
+  const first = enqueueDiscoveryRefresh({ reason: "manual" });
+  assert.equal(first.enqueued, true);
+  const claimed = honkerDbModule.getDiscoveryRefreshQueue().claimOne("aurral-test-worker");
+  assert.ok(claimed);
+  claimed.ack();
+
+  const second = enqueueDiscoveryRefresh({ reason: "manual" });
+  assert.equal(second.enqueued, true);
+  assert.equal(countDiscoveryRefreshJobs(), 1);
 });
 
 test("enqueueDiscoveryRefresh deduplicates active refresh requests", () => {
@@ -124,6 +284,30 @@ test("enqueueDiscoveryRefresh treats force as success when already updating", ()
   assert.equal(result.reason, "already_updating");
 });
 
+test("recoverDeadDiscoveryRefresh clears jobs and locks owned by dead local workers", () => {
+  clearDiscoveryRefreshJobs();
+  const workerId = "aurral-99999999";
+  const lock = honkerDbModule.getHonkerDb().tryLock(
+    "discovery-global-refresh",
+    workerId,
+    3600,
+  );
+  assert.ok(lock);
+  const jobId = honkerDbModule.getDiscoveryRefreshQueue().enqueue({ reason: "manual" });
+  const claimed = honkerDbModule.getDiscoveryRefreshQueue().claimOne(workerId);
+  assert.equal(claimed?.id, jobId);
+
+  assert.equal(recoverDeadDiscoveryRefresh(), true);
+  assert.equal(
+    honkerDbModule.getHonkerDb().query(
+      "SELECT COUNT(*) AS count FROM _honker_live WHERE id = ?",
+      [jobId],
+    )[0]?.count,
+    0,
+  );
+  assert.equal(honkerDbModule.isHonkerLockHeld("discovery-global-refresh"), false);
+});
+
 test("enqueueDiscoveryRefresh deduplicates when refresh queue lock is held", () => {
   const first = enqueueDiscoveryRefresh({ reason: "manual" });
   assert.equal(first.enqueued, true);
@@ -144,7 +328,6 @@ test("enqueueDiscoveryRefresh does not treat cache.isUpdating alone as in-progre
 
 test("enqueueDiscoveryRefresh queues immediate refresh", () => {
   const cache = getDiscoveryCache();
-  markDiscoveryRefreshDequeued();
   cache.isUpdating = false;
   const result = enqueueDiscoveryRefresh({ reason: "manual" });
   assert.equal(result.enqueued, true);

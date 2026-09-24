@@ -1,4 +1,5 @@
 import { getData, postData, lidarrCredentialParams } from "../core.js";
+import { queryClient, queryKeys } from "../../../queryClient.js";
 
 export const startPlexAuth = (forwardUrl) =>
   postData("/settings/plex/auth/pin", { forwardUrl });
@@ -29,35 +30,72 @@ export const getPlexLibraries = () => getData("/settings/plex/libraries");
 export const checkPlexLibraryAccess = (sectionId) =>
   getData(`/settings/plex/libraries/${encodeURIComponent(sectionId)}/access-check`);
 
-export const getAppSettings = () => getData("/settings");
+export const fetchAppSettings = ({ signal } = {}) => getData("/settings", { signal });
+
+export const getAppSettings = () =>
+  queryClient.fetchQuery({
+    queryKey: queryKeys.appSettings,
+    queryFn: ({ signal }) => fetchAppSettings({ signal }),
+    staleTime: 30_000,
+  });
+
+export const fetchPlaybackSettings = ({ signal } = {}) =>
+  getData("/settings/playback", { signal });
+
+export const getPlaybackSettings = () =>
+  queryClient.fetchQuery({
+    queryKey: queryKeys.playbackSettings,
+    queryFn: ({ signal }) => fetchPlaybackSettings({ signal }),
+    staleTime: 30_000,
+  });
+export const testPlaybackConnection = (key, config) =>
+  postData(`/settings/playback/${encodeURIComponent(key)}/test`, config);
+
+export const fetchDownloadClientSettings = ({ signal } = {}) =>
+  getData("/settings/download-clients", { signal });
+
+export const getDownloadClientSettings = () =>
+  queryClient.fetchQuery({
+    queryKey: queryKeys.downloadClientSettings,
+    queryFn: ({ signal }) => fetchDownloadClientSettings({ signal }),
+    staleTime: 30_000,
+  });
+
+export const testDownloadClientConnection = (key, config) =>
+  postData(`/settings/download-clients/${encodeURIComponent(key)}/test`, config);
 
 export const updateAppSettings = (settings) => postData("/settings", settings);
 
-export const getLidarrRootFolders = (url, apiKey) =>
+export const getLidarrRootFolders = (url, apiKey, { signal } = {}) =>
   getData("/settings/lidarr/root-folders", {
     params: lidarrCredentialParams(url, apiKey),
+    signal,
   });
 
-export const getLidarrProfiles = (url, apiKey) =>
+export const getLidarrProfiles = (url, apiKey, { signal } = {}) =>
   getData("/settings/lidarr/profiles", {
     params: lidarrCredentialParams(url, apiKey),
+    signal,
   });
 
-export const getLidarrMetadataProfiles = (url, apiKey) =>
+export const getLidarrMetadataProfiles = (url, apiKey, { signal } = {}) =>
   getData("/settings/lidarr/metadata-profiles", {
     params: lidarrCredentialParams(url, apiKey),
+    signal,
   });
 
-export const getLidarrTags = (url, apiKey) =>
+export const getLidarrTags = (url, apiKey, { signal } = {}) =>
   getData("/settings/lidarr/tags", {
     params: lidarrCredentialParams(url, apiKey),
+    signal,
   });
 
 export const testSlskdConnection = () => postData("/settings/slskd/test");
 
 export const testProwlarrConnection = () => postData("/settings/prowlarr/test");
 
-export const getProwlarrIndexers = () => getData("/settings/prowlarr/indexers");
+export const getProwlarrIndexers = ({ signal } = {}) =>
+  getData("/settings/prowlarr/indexers", { signal });
 
 export const testNzbgetConnection = () => postData("/settings/nzbget/test");
 
@@ -75,18 +113,22 @@ export const testLidarrLibraryAccess = (url, apiKey) =>
     params: lidarrCredentialParams(url, apiKey),
   });
 
-export const getStorageHealth = ({ force = false } = {}) =>
-  getData("/settings/storage-health", {
-    params: force ? { force: "1" } : undefined,
-  });
+export const getStorageHealth = ({ signal } = {}) =>
+  getData("/settings/storage-health", { signal });
 
-export const getSettingsTasks = () => getData("/settings/tasks");
+export const runStorageHealthCheck = ({ signal } = {}) =>
+  postData("/settings/storage-health/check", {}, { signal });
+
+export const getSettingsTasks = ({ signal } = {}) => getData("/settings/tasks", { signal });
 
 export const clearSettingsStaleTasks = () =>
   postData("/settings/tasks/clear-stale");
 
 export const testGotifyConnection = (url, token) =>
   postData("/settings/gotify/test", { url, token });
+
+export const testWebhookConnection = (webhook) =>
+  postData("/settings/webhook/test", webhook);
 
 export const applyLidarrCommunityGuide = () =>
   postData("/settings/lidarr/apply-community-guide");

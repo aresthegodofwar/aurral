@@ -1,0 +1,195 @@
+import assert from "node:assert/strict";
+import crypto from "node:crypto";
+import test from "node:test";
+
+import {
+  cleanupIsolatedState,
+  resetDatabase,
+  setupIsolatedBackend,
+  startServerProcess,
+} from "../helpers/backendTestHarness.js";
+
+const [isolatedState, { db }, { dbOps, userOps }, { hashPassword }] =
+  await setupIsolatedBackend(
+    "subsonic-contract",
+    "backend/config/db-sqlite.js",
+    "backend/db/helpers/index.js",
+    "backend/middleware/passwordHash.js",
+  );
+
+let aurral;
+
+function subsonicUrl(method, params = {}) {
+  const query = new URLSearchParams({
+    u: "alice",
+    p: "password123",
+    v: "1.16.1",
+    c: "contract-test",
+    ...params,
+  });
+  return `http://127.0.0.1:${aurral.port}/rest/${method}.view?${query}`;
+}
+
+async function request(method, params) {
+  const response = await fetch(subsonicUrl(method, params));
+  const contentType = response.headers.get("content-type") || "";
+  const body = await response.text();
+  return {
+    response,
+    contentType,
+    body,
+    json: contentType.includes("json") ? JSON.parse(body)["subsonic-response"] : null,
+  };
+}
+
+test.before(async () => {
+  resetDatabase(db);
+  dbOps.updateSettings({ integrations: {}, onboardingComplete: true });
+  userOps.createUser("alice", hashPassword("password123"), "user");
+  userOps.createUser("bob", hashPassword("bob-password"), "user");
+  aurral = await startServerProcess({ extraEnv: { CORS_ORIGIN: "" } });
+});
+
+test.after(async () => {
+  await aurral?.stop();
+  await cleanupIsolatedState(isolatedState);
+});
+
+test("authenticates an Aurral user and returns JSON or XML envelopes", async () => {
+  const json = await request("ping", { f: "json" });
+  assert.equal(json.response.status, 200);
+  assert.equal(json.json.status, "ok");
+  assert.equal(json.json.version, "1.16.1");
+  assert.equal(json.json.type, "Aurral");
+  assert.equal(typeof json.json.serverVersion, "string");
+  assert.equal(Object.hasOwn(json.json, "error"), false);
+
+  const encoded = await request("ping", {
+    p: `enc:${Buffer.from("password123").toString("hex")}`,
+    f: "json",
+  });
+  assert.equal(encoded.json.status, "ok");
+
+  const xml = await request("ping");
+  assert.equal(xml.response.status, 200);
+  assert.match(xml.contentType, /application\/xml/);
+  assert.match(xml.body, /<subsonic-response[^>]+status="ok"/);
+  assert.match(xml.body, /xmlns="http:\/\/subsonic\.org\/restapi"/);
+});
+
+test("supports token auth for every local user and syncs password changes", async () => {
+  const loginResponse = await fetch(`http://127.0.0.1:${aurral.port}/api/auth/login`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ username: "bob", password: "bob-password" }),
+  });
+  assert.equal(loginResponse.status, 200);
+  const login = await loginResponse.json();
+  assert.equal(typeof login.token, "string");
+
+  const storedSecret = db
+    .prepare("SELECT subsonic_password FROM users WHERE username = ?")
+    .get("bob");
+  assert.match(storedSecret.subsonic_password, /^AURRAL_ENC:/);
+  assert.equal(storedSecret.subsonic_password.includes("bob-password"), false);
+
+  const salt = "bob-salt";
+  const token = (password) =>
+    crypto.createHash("md5").update(`${password}${salt}`).digest("hex");
+  const initialToken = await request("ping", {
+    u: "bob",
+    p: "",
+    t: token("bob-password"),
+    s: salt,
+    f: "json",
+  });
+  assert.equal(initialToken.json.status, "ok");
+
+  const passwordChange = await fetch(`http://127.0.0.1:${aurral.port}/api/users/me/password`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${login.token}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      currentPassword: "bob-password",
+      newPassword: "bob-new-password",
+    }),
+  });
+  assert.equal(passwordChange.status, 200);
+
+  const oldToken = await request("ping", {
+    u: "bob",
+    p: "",
+    t: token("bob-password"),
+    s: salt,
+    f: "json",
+  });
+  assert.equal(oldToken.json.error.code, 41);
+
+  const newToken = await request("ping", {
+    u: "bob",
+    p: "",
+    t: token("bob-new-password"),
+    s: salt,
+    f: "json",
+  });
+  assert.equal(newToken.json.status, "ok");
+});
+
+test("allows browser Subsonic clients without CORS configuration", async () => {
+  const response = await fetch(subsonicUrl("ping", { f: "json" }), {
+    headers: { Origin: "http://feishin.example" },
+  });
+  assert.equal(response.headers.get("access-control-allow-origin"), "*");
+
+  const preflight = await fetch(subsonicUrl("ping", { f: "json" }), {
+    method: "OPTIONS",
+    headers: {
+      Origin: "http://feishin.example",
+      "Access-Control-Request-Method": "GET",
+    },
+  });
+  assert.equal(preflight.status, 204);
+  assert.equal(preflight.headers.get("access-control-allow-origin"), "*");
+});
+
+test("allows browser clients to read redirected artwork without CORS configuration", async () => {
+  const response = await fetch(`http://127.0.0.1:${aurral.port}/api/image-proxy/missing-cache-key.webp`, {
+    headers: { Origin: "http://feishin.example" },
+  });
+  assert.equal(response.headers.get("access-control-allow-origin"), "*");
+  assert.equal(response.headers.get("cross-origin-resource-policy"), "cross-origin");
+});
+
+test("returns the Subsonic invalid-credentials error", async () => {
+  const result = await request("ping", { p: "wrong-password", f: "json" });
+  assert.equal(result.response.status, 200);
+  assert.deepEqual(result.json.error, {
+    code: 40,
+    message: "Wrong username or password",
+  });
+  assert.equal(result.json.status, "failed");
+});
+
+test("returns protocol errors for unsupported authentication and requests", async () => {
+  const token = await request("ping", { p: "", t: "token", s: "salt", f: "json" });
+  assert.equal(token.json.error.code, 41);
+
+  const unsupported = await request("getVideos", { f: "json" });
+  assert.deepEqual(unsupported.json.error, {
+    code: 0,
+    message: "Unsupported request: getvideos",
+  });
+
+  const unsupportedFormat = await request("ping", { f: "jsonp" });
+  assert.match(unsupportedFormat.contentType, /application\/xml/);
+  assert.match(unsupportedFormat.body, /code="0"/);
+});
+
+test("keeps the Subsonic contract after a process restart", async () => {
+  await aurral.stop();
+  aurral = await startServerProcess();
+  const result = await request("ping", { f: "json" });
+  assert.equal(result.json.status, "ok");
+});

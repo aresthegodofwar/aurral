@@ -31,11 +31,11 @@ const DISCOVER_RECENT_RELEASES_KEY = "discoverRecentReleases";
 
 export const DEFAULT_DISCOVER_SECTIONS = [
   { id: "recentlyAdded", label: "Recently Added", enabled: true },
-  { id: "playlists", label: "Playlists for you", enabled: true },
+  { id: "playlists", label: "Playlists", enabled: true },
   { id: "recommendedShows", label: "Shows Near You", enabled: true },
   { id: "recentReleases", label: "Recent Releases", enabled: true },
   { id: "news", label: "Artist News", enabled: true },
-  { id: "recommended", label: "Recommended for You", enabled: true },
+  { id: "recommended", label: "Recommended", enabled: true },
   { id: "globalTop", label: "Global Trending", enabled: true },
   { id: "genreSections", label: "Because You Like", enabled: true },
 ];
@@ -52,6 +52,7 @@ export const getFallbackGenreFromSectionId = (id) =>
 
 export const DISCOVER_NEARBY_MODE_KEY = "discoverNearbyMode";
 export const DISCOVER_NEARBY_ZIP_KEY = "discoverNearbyZip";
+export const DISCOVER_NEARBY_COUNTRY_KEY = "discoverNearbyCountry";
 export const DISCOVER_PREVIEW_ITEM_LIMIT = 12;
 
 const getDiscoverLayoutStorageKey = (userId) =>
@@ -78,13 +79,46 @@ const markStoredAt = (key) => {
   } catch {}
 };
 
-const isStoredFresh = (key) => {
+const readStoredAt = (key) => {
   try {
     const at = Number(localStorage.getItem(`${key}:at`));
-    return Number.isFinite(at) && Date.now() - at < DISCOVER_CACHE_FRESH_TTL_MS;
+    return Number.isFinite(at) ? at : 0;
   } catch {
-    return false;
+    return 0;
   }
+};
+
+const getStoredArraySourceKey = (primaryKey, fallbackKey) => {
+  try {
+    const primary = JSON.parse(localStorage.getItem(primaryKey) || "null");
+    if (Array.isArray(primary)) return primaryKey;
+    if (primaryKey === fallbackKey) return null;
+    const fallback = JSON.parse(localStorage.getItem(fallbackKey) || "null");
+    return Array.isArray(fallback) ? fallbackKey : null;
+  } catch {
+    return null;
+  }
+};
+
+const readStoredArray = (primaryKey, fallbackKey) => {
+  const sourceKey = getStoredArraySourceKey(primaryKey, fallbackKey);
+  if (!sourceKey) return null;
+  try {
+    return JSON.parse(localStorage.getItem(sourceKey) || "null");
+  } catch {
+    return null;
+  }
+};
+
+const readStoredArrayAt = (primaryKey, fallbackKey) => {
+  const sourceKey = getStoredArraySourceKey(primaryKey, fallbackKey);
+  return sourceKey ? readStoredAt(sourceKey) : 0;
+};
+
+const isStoredFresh = (key) => {
+  const at = readStoredAt(key);
+  const age = Date.now() - at;
+  return at > 0 && age >= 0 && age < DISCOVER_CACHE_FRESH_TTL_MS;
 };
 
 export const isStoredRecentlyAddedFresh = (userId) =>
@@ -93,19 +127,26 @@ export const isStoredRecentlyAddedFresh = (userId) =>
 export const isStoredRecentReleasesFresh = (userId) =>
   isStoredFresh(getDiscoverRecentReleasesStorageKey(userId));
 
+export const getStoredRecentlyAddedAt = (userId) =>
+  readStoredArrayAt(getDiscoverRecentlyAddedStorageKey(userId), DISCOVER_RECENTLY_ADDED_KEY);
+
+export const getStoredRecentReleasesAt = (userId) =>
+  readStoredArrayAt(getDiscoverRecentReleasesStorageKey(userId), DISCOVER_RECENT_RELEASES_KEY);
+
 export const readStoredNearbyLocation = () => {
   try {
     const storedMode = localStorage.getItem(DISCOVER_NEARBY_MODE_KEY);
     const storedZip = localStorage.getItem(DISCOVER_NEARBY_ZIP_KEY) || "";
+    const storedCountry = localStorage.getItem(DISCOVER_NEARBY_COUNTRY_KEY) || "";
     const mode =
       storedMode === "zip" || storedMode === "ip" ? storedMode : "ip";
-    return { mode, zip: storedZip };
+    return { mode, zip: storedZip, country: storedCountry };
   } catch {
-    return { mode: "ip", zip: "" };
+    return { mode: "ip", zip: "", country: "" };
   }
 };
 
-export const writeStoredNearbyLocation = ({ mode, zip } = {}) => {
+export const writeStoredNearbyLocation = ({ mode, zip, country } = {}) => {
   try {
     if (mode === "zip" || mode === "ip") {
       localStorage.setItem(DISCOVER_NEARBY_MODE_KEY, mode);
@@ -113,22 +154,17 @@ export const writeStoredNearbyLocation = ({ mode, zip } = {}) => {
     if (typeof zip === "string") {
       localStorage.setItem(DISCOVER_NEARBY_ZIP_KEY, zip);
     }
+    if (typeof country === "string") {
+      localStorage.setItem(DISCOVER_NEARBY_COUNTRY_KEY, country);
+    }
   } catch {}
 };
 
 export const readStoredRecentlyAdded = (userId) => {
-  try {
-    const primaryKey = getDiscoverRecentlyAddedStorageKey(userId);
-    const primary = JSON.parse(localStorage.getItem(primaryKey) || "null");
-    if (Array.isArray(primary)) return primary;
-    if (primaryKey === DISCOVER_RECENTLY_ADDED_KEY) return null;
-    const fallback = JSON.parse(
-      localStorage.getItem(DISCOVER_RECENTLY_ADDED_KEY) || "null",
-    );
-    return Array.isArray(fallback) ? fallback : null;
-  } catch {
-    return null;
-  }
+  return readStoredArray(
+    getDiscoverRecentlyAddedStorageKey(userId),
+    DISCOVER_RECENTLY_ADDED_KEY,
+  );
 };
 
 export const writeStoredRecentlyAdded = (value, userId) => {
@@ -145,18 +181,10 @@ export const writeStoredRecentlyAdded = (value, userId) => {
 };
 
 export const readStoredRecentReleases = (userId) => {
-  try {
-    const primaryKey = getDiscoverRecentReleasesStorageKey(userId);
-    const primary = JSON.parse(localStorage.getItem(primaryKey) || "null");
-    if (Array.isArray(primary)) return primary;
-    if (primaryKey === DISCOVER_RECENT_RELEASES_KEY) return null;
-    const fallback = JSON.parse(
-      localStorage.getItem(DISCOVER_RECENT_RELEASES_KEY) || "null",
-    );
-    return Array.isArray(fallback) ? fallback : null;
-  } catch {
-    return null;
-  }
+  return readStoredArray(
+    getDiscoverRecentReleasesStorageKey(userId),
+    DISCOVER_RECENT_RELEASES_KEY,
+  );
 };
 
 export const writeStoredRecentReleases = (value, userId) => {

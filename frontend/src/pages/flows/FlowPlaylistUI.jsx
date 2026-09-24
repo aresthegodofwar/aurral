@@ -1,20 +1,23 @@
 import {
   ArrowRight,
   Clock,
+  ChevronDown,
   ListMusic,
-  Loader2,
   Plus,
   Sparkles,
   Upload,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import PillToggle from "../../components/PillToggle";
+import { DotLoader } from "../../components/DotLoader";
+import TooltipButton from "../../components/TooltipButton";
 import { PlaylistArtworkThumb } from "./flowComponents/PlaylistArtworkThumb.jsx";
 import {
   formatTrackCountLabel,
   getFlowDisplayTrackCount,
   getSharedPlaylistTrackCount,
 } from "./flowStats";
+import Tooltip from "../../components/Tooltip";
 
 export function LibrarySidebarToggleIcon({ collapsed = false }) {
   return (
@@ -60,25 +63,63 @@ export function FlowLibraryCreateMenu({
   creatingPlaylist = false,
   creatingFlow = false,
   canCreateFlow = true,
+  showPlaylists = true,
+  showFlows = true,
+  showImport = true,
   compact = false,
 }) {
   const [isOpen, setIsOpen] = useState(false);
   const close = () => setIsOpen(false);
+  const triggerLabel = showFlows ? "Create playlist or flow" : "Create playlist";
+
+  useEffect(() => {
+    if (!isOpen) return undefined;
+    const handleKeyDown = (event) => {
+      if (event.key === "Escape") setIsOpen(false);
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [isOpen]);
+
+  const triggerContent = (
+    <>
+      <Plus className="flow-page__library-create-icon" aria-hidden="true" />
+      {!compact ? <span className="flow-page__library-create-label">New</span> : null}
+      {!compact ? (
+        <ChevronDown
+          className={`flow-page__library-create-chevron${isOpen ? " is-open" : ""}`}
+          aria-hidden="true"
+        />
+      ) : null}
+    </>
+  );
 
   return (
     <div
       className={`flow-page__library-create${compact ? " is-compact" : ""}${isOpen ? " is-open" : ""}`}
     >
-      <button
-        type="button"
-        className="flow-page__library-create-btn"
-        onClick={() => setIsOpen((prev) => !prev)}
-        aria-label="Create playlist or flow"
-        aria-expanded={isOpen}
-        aria-haspopup="menu"
-      >
-        <Plus className="flow-page__library-create-icon" aria-hidden="true" />
-      </button>
+      {compact ? (
+        <TooltipButton
+          label={triggerLabel}
+          className="flow-page__library-create-btn"
+          onClick={() => setIsOpen((prev) => !prev)}
+          aria-expanded={isOpen}
+          aria-haspopup="menu"
+        >
+          {triggerContent}
+        </TooltipButton>
+      ) : (
+        <button
+          type="button"
+          className="flow-page__library-create-btn"
+          onClick={() => setIsOpen((prev) => !prev)}
+          aria-label={triggerLabel}
+          aria-expanded={isOpen}
+          aria-haspopup="menu"
+        >
+          {triggerContent}
+        </button>
+      )}
       {isOpen ? (
         <>
           <button
@@ -88,9 +129,12 @@ export function FlowLibraryCreateMenu({
             aria-label="Close menu"
           />
           <div className="flow-page__library-create-menu" role="menu" aria-label="Create and import">
-            <p className="flow-page__library-create-menu-label">Create</p>
-            <div className="flow-page__library-create-primary">
-              <button
+            {showPlaylists || showFlows ? (
+              <p className="flow-page__library-create-menu-label">Create</p>
+            ) : null}
+            {showPlaylists || (showFlows && canCreateFlow) ? (
+              <div className="flow-page__library-create-primary">
+              {showPlaylists ? <button
                 type="button"
                 role="menuitem"
                 className="flow-page__library-create-action flow-page__library-create-action--playlist"
@@ -101,18 +145,19 @@ export function FlowLibraryCreateMenu({
                 }}
               >
                 <span className="flow-page__library-create-action-icon" aria-hidden="true">
-                  <ListMusic className="flow-page__library-create-action-glyph" />
+                  {creatingPlaylist ? (
+                    <DotLoader size="sm" label={null} />
+                  ) : (
+                    <ListMusic className="flow-page__library-create-action-glyph" />
+                  )}
                 </span>
                 <span className="flow-page__library-create-action-copy">
                   <span className="flow-page__library-create-action-title">
-                    {creatingPlaylist ? "Creating playlist..." : "New playlist"}
-                  </span>
-                  <span className="flow-page__library-create-action-desc">
-                    Curate and play your own track list
+                    {creatingPlaylist ? "Creating playlist…" : "New playlist"}
                   </span>
                 </span>
-              </button>
-              {canCreateFlow ? (
+              </button> : null}
+              {showFlows && canCreateFlow ? (
                 <button
                   type="button"
                   role="menuitem"
@@ -127,23 +172,25 @@ export function FlowLibraryCreateMenu({
                     className="flow-page__library-create-action-icon flow-page__library-create-action-icon--flow"
                     aria-hidden="true"
                   >
-                    <Sparkles className="flow-page__library-create-action-glyph" />
+                    {creatingFlow ? (
+                      <DotLoader size="sm" label={null} />
+                    ) : (
+                      <Sparkles className="flow-page__library-create-action-glyph" />
+                    )}
                   </span>
                   <span className="flow-page__library-create-action-copy">
                     <span className="flow-page__library-create-action-title">
-                      {creatingFlow ? "Creating flow..." : "New flow"}
-                    </span>
-                    <span className="flow-page__library-create-action-desc">
-                      Auto-updating playlist from your recipe
+                      {creatingFlow ? "Creating flow…" : "New flow"}
                     </span>
                   </span>
                 </button>
               ) : null}
-            </div>
-            <p className="flow-page__library-create-menu-label flow-page__library-create-menu-label--import">
+              </div>
+            ) : null}
+            {showImport ? <p className="flow-page__library-create-menu-label flow-page__library-create-menu-label--import">
               Import
-            </p>
-            <div className="flow-page__library-create-primary">
+            </p> : null}
+            {showImport ? <div className="flow-page__library-create-primary">
               <button
                 type="button"
                 role="menuitem"
@@ -161,12 +208,9 @@ export function FlowLibraryCreateMenu({
                 </span>
                 <span className="flow-page__library-create-action-copy">
                   <span className="flow-page__library-create-action-title">Import playlist</span>
-                  <span className="flow-page__library-create-action-desc">
-                    From Spotify or a JSON export
-                  </span>
                 </span>
               </button>
-            </div>
+            </div> : null}
           </div>
         </>
       ) : null}
@@ -191,7 +235,10 @@ export function PlaylistLibraryItem({
     entry.kind === "flow"
       ? getFlowDisplayTrackCount(entry, stats)
       : getSharedPlaylistTrackCount(entry, stats);
-  const trackLabel = formatTrackCountLabel(trackCount, stats);
+  const trackLabel =
+    entry.kind === "flow"
+      ? formatTrackCountLabel(trackCount, stats)
+      : `${trackCount} ${trackCount === 1 ? "track" : "tracks"}`;
   const baseTypeLabel =
     entry.kind === "flow" ? (entry.enabled === true ? "Flow" : "Flow draft") : "Playlist";
   const showOwner =
@@ -200,55 +247,64 @@ export function PlaylistLibraryItem({
   const showSyncedBadge =
     entry.kind === "shared" &&
     entry.importSource?.syncEnabled === true &&
-    entry.importSource?.provider === "spotify-playlist";
+    ["spotify-playlist", "listenbrainz-playlist", "listenbrainz-createdfor", "lastfm-station"].includes(
+      entry.importSource?.provider,
+    );
 
   return (
     <div
       className={`flow-page__library-item${isActive ? " is-active" : ""}${expanded ? " is-expanded" : ""}`}
     >
-      <button
-        type="button"
-        className="flow-page__library-item-main"
-        aria-current={isActive ? "true" : undefined}
-        aria-expanded={expanded ? "true" : undefined}
-        aria-label={collapsed ? entry.name : undefined}
-        title={collapsed ? entry.name : undefined}
-        onClick={() => onSelect?.(entry)}
-      >
-        <PlaylistArtworkThumb
-          artworkUrl={artworkUrl}
-          name={entry.name}
-          className="flow-page__library-item-artwork"
-        />
-        <div
-          className="flow-page__library-item-body"
-          title={collapsed && activityHint ? activityHint : undefined}
+      <Tooltip content={collapsed ? entry.name : undefined}>
+        <button
+          type="button"
+          className="flow-page__library-item-main"
+          aria-current={isActive ? "true" : undefined}
+          aria-expanded={expanded ? "true" : undefined}
+          aria-label={collapsed ? entry.name : undefined}
+          onClick={() => onSelect?.(entry)}
         >
-          <div className="flow-page__library-item-top">
-            <span className="flow-page__library-item-type-row">
-              <span className="flow-page__library-item-type">{typeLabel}</span>
-              {showSyncedBadge ? (
-                <span className="flow-page__badge flow-page__badge--sync">Synced</span>
-              ) : null}
-            </span>
-            {activityHint ? (
-              <span
-                className="flow-page__library-item-activity"
-                title={activityHint}
-                aria-label={activityHint}
-              >
-                <Loader2 className="artist-icon-xs animate-spin" aria-hidden="true" />
-              </span>
-            ) : null}
-          </div>
-          <span className="flow-page__library-item-title" title={entry.name}>
-            {entry.name}
-          </span>
-          <span className="flow-page__library-item-meta" title={trackLabel}>
-            {trackLabel}
-          </span>
-        </div>
-      </button>
+          <PlaylistArtworkThumb
+            artworkUrl={artworkUrl}
+            name={entry.name}
+            className="flow-page__library-item-artwork"
+          />
+          <Tooltip content={collapsed && activityHint ? activityHint : undefined}>
+            <div
+              className="flow-page__library-item-body"
+            >
+              <div className="flow-page__library-item-top">
+                <span className="flow-page__library-item-type-row">
+                  <span className="flow-page__library-item-type">{typeLabel}</span>
+                  {showSyncedBadge ? (
+                    <span className="flow-page__badge flow-page__badge--sync">Synced</span>
+                  ) : null}
+                </span>
+                {activityHint ? (
+                  <Tooltip content={activityHint}>
+                    <span
+                      className="flow-page__library-item-activity"
+                      aria-label={activityHint}
+                    >
+                      <DotLoader size="xs" label={null} />
+                    </span>
+                  </Tooltip>
+                ) : null}
+              </div>
+              <Tooltip content={entry.name}>
+                <span className="flow-page__library-item-title" >
+                  {entry.name}
+                </span>
+              </Tooltip>
+              <Tooltip content={trackLabel}>
+                <span className="flow-page__library-item-meta" >
+                  {trackLabel}
+                </span>
+              </Tooltip>
+            </div>
+          </Tooltip>
+        </button>
+      </Tooltip>
       {trailing ? <div className="flow-page__library-item-trailing">{trailing}</div> : null}
     </div>
   );
@@ -267,24 +323,27 @@ function FlowDetailMeta({ meta }) {
     parts.push(
       <span key="run" className="flow-page__detail-meta-run">
         {meta.lastRunShort ? (
-          <span className="flow-page__detail-meta-chip" title={meta.lastRunTitle || undefined}>
-            <Clock className="artist-icon-xs" aria-hidden="true" />
-            {meta.lastRunShort}
-          </span>
+          <Tooltip content={meta.lastRunTitle || undefined}>
+            <span className="flow-page__detail-meta-chip" >
+              <Clock className="artist-icon-xs" aria-hidden="true" />
+              {meta.lastRunShort}
+            </span>
+          </Tooltip>
         ) : null}
         {meta.nextRunShort ? (
-          <span
-            className="flow-page__detail-meta-chip flow-page__detail-meta-chip--next"
-            title={meta.nextRunTitle || undefined}
-          >
-            {meta.lastRunShort ? (
-              <ArrowRight
-                className="artist-icon-xs flow-page__detail-meta-arrow"
-                aria-hidden="true"
-              />
-            ) : null}
-            {meta.nextRunShort}
-          </span>
+          <Tooltip content={meta.nextRunTitle || undefined}>
+            <span
+              className="flow-page__detail-meta-chip flow-page__detail-meta-chip--next"
+            >
+              {meta.lastRunShort ? (
+                <ArrowRight
+                  className="artist-icon-xs flow-page__detail-meta-arrow"
+                  aria-hidden="true"
+                />
+              ) : null}
+              {meta.nextRunShort}
+            </span>
+          </Tooltip>
         ) : null}
       </span>,
     );
@@ -336,14 +395,15 @@ export function PlaylistDetailHero({
             <div className="flow-page__detail-hero-top">
               <span className="flow-page__detail-eyebrow">{typeLabel}</span>
             </div>
-            <button
-              type="button"
-              className="flow-page__detail-title flow-page__detail-title--hero flow-page__detail-title-button"
-              title={entry.name}
-              onClick={onRenameTitle}
-            >
-              {entry.name}
-            </button>
+            <Tooltip content={entry.name}>
+              <button
+                type="button"
+                className="flow-page__detail-title flow-page__detail-title--hero flow-page__detail-title-button"
+                onClick={onRenameTitle}
+              >
+                {entry.name}
+              </button>
+            </Tooltip>
             {flowMeta ? (
               <FlowDetailMeta meta={flowMeta} />
             ) : metaLine ? (
@@ -351,7 +411,7 @@ export function PlaylistDetailHero({
             ) : null}
             {activityHint ? (
               <p className="flow-page__detail-meta flow-page__detail-activity">
-                <Loader2 className="artist-icon-xs animate-spin" aria-hidden="true" />
+                <DotLoader size="xs" label={null} />
                 <span>{activityHint}</span>
               </p>
             ) : null}

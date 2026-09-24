@@ -1,55 +1,55 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import {
   startPlexAuth,
   checkPlexAuth,
   getPlexResources,
   getPlexLibraries,
   checkPlexLibraryAccess,
-  testPlexConnection,
-  testNavidromeConnection,
+  testPlaybackConnection,
   syncPlexNow,
 } from "../../../utils/api/endpoints/settings.js";
+import {
+  getLastfmScrobbleLink,
+  getScrobbleStatus,
+  linkKoito,
+  linkListenBrainz,
+  unlinkScrobbleProvider,
+} from "../../../utils/api/endpoints/auth.js";
 import { getConfiguredStatus } from "../utils/integrationStatus";
 
 import {
   AlertTriangle,
   CheckCircle,
   Folder,
-  Plus,
   RefreshCw,
-  Trash2,
-  Wrench,
 } from "lucide-react";
-import DownloadFolderPickerModal from "../../../components/DownloadFolderPickerModal";
+import { DotLoader } from "../../../components/DotLoader";
 import PillToggle from "../../../components/PillToggle";
+import DownloadFolderPickerModal from "../../../components/DownloadFolderPickerModal";
 import { SettingsInput, SettingsSelect } from "./SettingsField";
+import { SettingsAdapterFields } from "./SettingsAdapterFields";
 import { IntegrationCard, SettingsIntegrationModal } from "./SettingsIntegrationCards";
 import {
   SettingsArrCardGrid,
   SettingsArrFieldSet,
-  SettingsArrFormGroup,
 } from "./arr/SettingsArrLayout";
-import { NavidromePathMappingModal } from "./NavidromePathMappingModal";
 import {
   SettingsModalActions,
+  SettingsModalCallout,
   SettingsModalField,
   SettingsModalIntro,
   SettingsModalSection,
+  SettingsModalToggle,
+  SettingsModalToggleGroup,
 } from "./SettingsModalLayout";
 import {
   pickBestPlexConnection,
   resolvePlexConnectionUrl,
 } from "../utils/plexConnections";
-function coerceNavidromePathMappings(value) {
-  if (!Array.isArray(value)) return [];
-  return value.map((entry) => ({
-    local: String(entry?.local || "").trim(),
-    remote: String(entry?.remote || "").trim(),
-  }));
-}
-
 export function SettingsPlaybackSection({
   settings,
+  playbackSettings,
   updateSettings,
   hasUnsavedChanges,
   handleSaveSettings,
@@ -61,33 +61,51 @@ export function SettingsPlaybackSection({
   const [plexConnecting, setPlexConnecting] = useState(false);
   const [testingPlex, setTestingPlex] = useState(false);
   const [testingNavidrome, setTestingNavidrome] = useState(false);
+  const [testingJellyfin, setTestingJellyfin] = useState(false);
+  const [testStatus, setTestStatus] = useState(null);
   const [syncingPlex, setSyncingPlex] = useState(false);
   const [plexServers, setPlexServers] = useState([]);
   const [plexLibraries, setPlexLibraries] = useState([]);
   const [libraryAccessCheck, setLibraryAccessCheck] = useState(null);
-  const [navidromeMappingModal, setNavidromeMappingModal] = useState(null);
   const [plexPathPickerOpen, setPlexPathPickerOpen] = useState(false);
   const [plexLibraryPathPickerOpen, setPlexLibraryPathPickerOpen] = useState(false);
+  const [scrobbleStatus, setScrobbleStatus] = useState(null);
+  const [listenBrainzToken, setListenBrainzToken] = useState("");
+  const [koitoToken, setKoitoToken] = useState("");
+  const [koitoUrl, setKoitoUrl] = useState("");
+  const lastfmPollRef = useRef(null);
+
+  useEffect(() => {
+    setTestStatus(null);
+  }, [activeModal]);
 
   const navidrome = settings.integrations?.navidrome || {};
   const plex = settings.integrations?.plex || {};
+  const jellyfin = settings.integrations?.jellyfin || {};
   const navidromeConfigured = Boolean(navidrome.url);
   const plexConfigured = Boolean(plex.token && plex.url);
+  const jellyfinConfigured = Boolean(jellyfin.url && jellyfin.apiKey && jellyfin.userId);
   const plexToken = plex.token;
-  const navidromePathMappings = coerceNavidromePathMappings(navidrome.pathMappings).filter(
-    (entry) => entry.local || entry.remote,
-  );
   const pathMappings = Array.isArray(settings.pathMappings) ? settings.pathMappings : [];
   const plexLibraryMapping = pathMappings.find((entry) => entry?.source === "plex") || null;
-  const showNavidromeMappings =
-    navidrome.m3uPathMode === "remote" || navidromePathMappings.length > 0;
+
+  const refreshScrobbleStatus = () => getScrobbleStatus().then(setScrobbleStatus).catch(() => {});
+
+  useEffect(() => {
+    refreshScrobbleStatus();
+    return () => {
+      if (lastfmPollRef.current) window.clearInterval(lastfmPollRef.current);
+      lastfmPollRef.current = null;
+    };
+  }, []);
 
   const closeModal = () => {
     setActiveModal(null);
     setPlexPathPickerOpen(false);
   };
 
-  const updateNavidrome = (patch) =>
+  const updateNavidrome = (patch) => {
+    setTestStatus(null);
     updateSettings({
       ...settings,
       integrations: {
@@ -95,43 +113,10 @@ export function SettingsPlaybackSection({
         navidrome: { ...navidrome, ...patch },
       },
     });
-
-  const updateNavidromePathMappings = (nextMappings) => {
-    updateNavidrome({
-      pathMappings: coerceNavidromePathMappings(nextMappings),
-    });
   };
 
-  const openAddNavidromeMapping = () => {
-    setNavidromeMappingModal({ mode: "add", index: null });
-  };
-
-  const openEditNavidromeMapping = (index) => {
-    setNavidromeMappingModal({ mode: "edit", index });
-  };
-
-  const closeNavidromeMappingModal = () => {
-    setNavidromeMappingModal(null);
-  };
-
-  const saveNavidromeMapping = (mapping) => {
-    if (navidromeMappingModal?.mode === "edit" && navidromeMappingModal.index != null) {
-      const nextMappings = [...navidromePathMappings];
-      nextMappings[navidromeMappingModal.index] = mapping;
-      updateNavidromePathMappings(nextMappings);
-    } else {
-      updateNavidromePathMappings([...navidromePathMappings, mapping]);
-    }
-    closeNavidromeMappingModal();
-  };
-
-  const deleteNavidromeMapping = (index) => {
-    updateNavidromePathMappings(
-      navidromePathMappings.filter((_entry, entryIndex) => entryIndex !== index),
-    );
-  };
-
-  const updatePlex = (patch) =>
+  const updatePlex = (patch) => {
+    setTestStatus(null);
     updateSettings({
       ...settings,
       integrations: {
@@ -139,6 +124,18 @@ export function SettingsPlaybackSection({
         plex: { ...plex, ...patch },
       },
     });
+  };
+
+  const updateJellyfin = (patch) => {
+    setTestStatus(null);
+    updateSettings({
+      ...settings,
+      integrations: {
+        ...settings.integrations,
+        jellyfin: { ...jellyfin, ...patch },
+      },
+    });
+  };
 
   const updatePlexLibraryLocalPath = (localPath) => {
     const trimmed = String(localPath || "").trim();
@@ -284,22 +281,27 @@ export function SettingsPlaybackSection({
   };
 
   const handleTestPlex = async () => {
+    setTestStatus(null);
     if (!plex.url || !plex.token) {
+      setTestStatus({ tone: "error", message: "Connect to Plex and select a server first." });
       showError("Connect to Plex and select a server first");
       return;
     }
     setTestingPlex(true);
     try {
-      const result = await testPlexConnection(plex.url, plex.token);
+      const result = await testPlaybackConnection("plex", plex);
       if (result.success) {
         showSuccess(`Plex connection successful!${result.version ? ` (v${result.version})` : ""}`);
         if (result.machineIdentifier) {
           updatePlex({ machineIdentifier: result.machineIdentifier });
         }
+        setTestStatus({ tone: "success", message: "Connected." });
       } else {
+        setTestStatus({ tone: "error", message: "Connection failed. Check Plex settings and retry." });
         showError(`Connection failed: ${result.message || result.error}`);
       }
     } catch (err) {
+      setTestStatus({ tone: "error", message: "Connection failed. Check Plex settings and retry." });
       const errorMsg = err.response?.data?.message || err.response?.data?.error || err.message;
       showError(`Connection failed: ${errorMsg}`);
     } finally {
@@ -308,8 +310,10 @@ export function SettingsPlaybackSection({
   };
 
   const handleTestNavidrome = async () => {
-    if (!navidrome.url || !navidrome.username) {
-      showError("Enter Navidrome URL and username first");
+    setTestStatus(null);
+    if (!navidrome.url || !navidrome.username || !navidrome.password) {
+      setTestStatus({ tone: "error", message: "Enter the URL and credentials first." });
+      showError("Enter Navidrome URL, username, and password first");
       return;
     }
     setTestingNavidrome(true);
@@ -317,13 +321,128 @@ export function SettingsPlaybackSection({
       if (handleSaveSettings) {
         await handleSaveSettings();
       }
-      await testNavidromeConnection(navidrome.url, navidrome.username, navidrome.password || "");
+      await testPlaybackConnection("navidrome", navidrome);
+      setTestStatus({ tone: "success", message: "Connected." });
       showSuccess("Navidrome connection OK");
     } catch (err) {
+      setTestStatus({ tone: "error", message: "Connection failed. Check the URL and credentials, then retry." });
       const errorMsg = err.response?.data?.message || err.response?.data?.error || err.message;
       showError(`Navidrome connection failed: ${errorMsg}`);
     } finally {
       setTestingNavidrome(false);
+    }
+  };
+
+  const handleTestJellyfin = async () => {
+    setTestStatus(null);
+    if (!jellyfin.url || !jellyfin.apiKey || !jellyfin.userId) {
+      setTestStatus({ tone: "error", message: "Enter the server URL, API key, and user ID first." });
+      showError("Enter the Jellyfin server URL, API key, and user ID first");
+      return;
+    }
+    setTestingJellyfin(true);
+    try {
+      if (handleSaveSettings) {
+        const saved = await handleSaveSettings();
+        if (saved !== true) {
+          setTestStatus({
+            tone: "error",
+            message: "Could not save settings. Fix the save error and retry.",
+          });
+          return;
+        }
+      }
+      await testPlaybackConnection("jellyfin", jellyfin);
+      setTestStatus({ tone: "success", message: "Connected." });
+      showSuccess("Jellyfin connection OK");
+    } catch (err) {
+      setTestStatus({ tone: "error", message: "Connection failed. Check the URL, API key, and user ID, then retry." });
+      const errorMsg = err.response?.data?.message || err.response?.data?.error || err.message;
+      showError(`Jellyfin connection failed: ${errorMsg}`);
+    } finally {
+      setTestingJellyfin(false);
+    }
+  };
+
+  const handleLastfmLink = async () => {
+    if (scrobbleStatus?.lastfm?.configured !== true) {
+      setActiveModal("lastfm");
+      return;
+    }
+    try {
+      if (lastfmPollRef.current) window.clearInterval(lastfmPollRef.current);
+      lastfmPollRef.current = null;
+      const result = await getLastfmScrobbleLink();
+      if (!result.authorizeUrl) {
+        showError("Could not start Last.fm linking.");
+        return;
+      }
+      const popup = window.open(
+        result.authorizeUrl,
+        "aurral-lastfm-link",
+        "popup,width=600,height=700",
+      );
+      if (!popup) {
+        showError("Allow popups to link Last.fm.");
+        return;
+      }
+      const deadline = Date.now() + 3 * 60 * 1000;
+      lastfmPollRef.current = window.setInterval(() => {
+        if (popup.closed || Date.now() >= deadline) {
+          window.clearInterval(lastfmPollRef.current);
+          lastfmPollRef.current = null;
+          refreshScrobbleStatus();
+        }
+      }, 500);
+    } catch (error) {
+      showError(error.response?.data?.error || error.message || "Could not start Last.fm linking");
+    }
+  };
+
+  const handleListenBrainzLink = async () => {
+    try {
+      await linkListenBrainz(listenBrainzToken);
+      setListenBrainzToken("");
+      refreshScrobbleStatus();
+      showSuccess("ListenBrainz connected.");
+    } catch (error) {
+      showError(error.response?.data?.error || error.message || "Could not connect ListenBrainz");
+    }
+  };
+
+  const handleKoitoLink = async () => {
+    try {
+      await linkKoito(koitoToken, koitoUrl);
+      setKoitoToken("");
+      refreshScrobbleStatus();
+      showSuccess("Koito connected.");
+    } catch (error) {
+      showError(error.response?.data?.error || error.message || "Could not connect Koito");
+    }
+  };
+
+  const handleUnlink = async (provider) => {
+    try {
+      await unlinkScrobbleProvider(provider);
+      setActiveModal(null);
+      refreshScrobbleStatus();
+      showSuccess(
+        `${provider === "lastfm" ? "Last.fm" : provider === "listenbrainz" ? "ListenBrainz" : "Koito"} disconnected.`,
+      );
+    } catch (error) {
+      showError(error.response?.data?.error || error.message || "Could not disconnect provider");
+    }
+  };
+
+  const handleScrobbleToggle = (provider, enabled) => {
+    if (enabled) {
+      if (provider === "lastfm" && scrobbleStatus?.lastfm?.configured !== true) {
+        setActiveModal("lastfm");
+        return;
+      }
+      setActiveModal(provider);
+    } else {
+      void handleUnlink(provider);
     }
   };
 
@@ -358,12 +477,13 @@ export function SettingsPlaybackSection({
   );
   const navidromeMeta = navidrome.username || navidrome.url || "Subsonic API";
   const plexMeta = selectedPlexServer?.name || (plex.token ? "Signed in" : "Flow playlists");
+  const jellyfinMeta = jellyfin.userId || jellyfin.url || "Jellyfin API";
 
   return (
     <>
-      <SettingsArrFieldSet legend="Playback Servers">
+      <SettingsArrFieldSet legend="Playback servers">
         <div className="arr-info">
-          Servers Aurral writes playlists to for in-app and external playback.
+          Where Aurral writes playlists.
         </div>
         <SettingsArrCardGrid>
           <IntegrationCard
@@ -380,169 +500,195 @@ export function SettingsPlaybackSection({
             meta={plexMeta}
             onClick={() => setActiveModal("plex")}
           />
+          <IntegrationCard
+            title="Jellyfin"
+            subtitle="Jellyfin API"
+            status={getConfiguredStatus(jellyfinConfigured)}
+            meta={jellyfinMeta}
+            onClick={() => setActiveModal("jellyfin")}
+          />
         </SettingsArrCardGrid>
       </SettingsArrFieldSet>
 
-      <SettingsArrFieldSet legend="Navidrome Playlist Paths">
+      <SettingsArrFieldSet legend="Scrobbling">
         <div className="arr-info">
-          Only needed when Navidrome cannot open Aurral&apos;s container paths, including native
-          Navidrome or Docker containers with different mounts.
+          Send completed local plays to listening services. Navidrome is not required.
         </div>
-
-        <SettingsArrFormGroup
-          label="M3U path mode"
-          help="Generated playlists will use mapped paths that Navidrome can open. Leave this off when Navidrome and Aurral share the same container paths."
-        >
-          <PillToggle
-            className="settings-toggle"
-            checked={navidrome.m3uPathMode === "remote"}
-            onChange={(event) =>
-              updateNavidrome({
-                m3uPathMode: event.target.checked ? "remote" : "local",
-              })
-            }
-            aria-label="Use Navidrome paths in M3U files"
-          />
-        </SettingsArrFormGroup>
-
-        {showNavidromeMappings ? (
-          <>
-            <p className="arr-form-help arr-form-help--spaced">
-              These mappings only change track lines in generated <code>.m3u</code> files. They do
-              not help Aurral read files reported by Lidarr, slskd, or NZBGet.
-            </p>
-
-            <div className="arr-table-wrap">
-              <table className="arr-table">
-                <thead>
-                  <tr>
-                    <th scope="col">Aurral Path</th>
-                    <th scope="col">Navidrome Path</th>
-                    <th scope="col" className="arr-table__actions-head">
-                      <span className="sr-only">Actions</span>
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {navidromePathMappings.length === 0 ? (
-                    <tr className="arr-table__empty-row">
-                      <td colSpan={3}>No Navidrome path mappings configured.</td>
-                    </tr>
-                  ) : (
-                    navidromePathMappings.map((mapping, index) => (
-                      <tr key={`navidrome-path-mapping-${index}`}>
-                        <td>
-                          <code className="arr-table__path">{mapping.local}</code>
-                        </td>
-                        <td>
-                          <code className="arr-table__path">{mapping.remote}</code>
-                        </td>
-                        <td className="arr-table__actions">
-                          <div className="arr-table__actions-inner">
-                            <button
-                              type="button"
-                              className="arr-btn arr-btn--ghost arr-btn--icon"
-                              aria-label={`Edit Navidrome path mapping ${index + 1}`}
-                              onClick={() => openEditNavidromeMapping(index)}
-                            >
-                              <Wrench className="artist-icon-sm" aria-hidden />
-                            </button>
-                            <button
-                              type="button"
-                              className="arr-btn arr-btn--ghost arr-btn--icon"
-                              aria-label={`Delete Navidrome path mapping ${index + 1}`}
-                              onClick={() => deleteNavidromeMapping(index)}
-                            >
-                              <Trash2 className="artist-icon-sm" aria-hidden />
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            </div>
-
-            <div className="arr-table-footer">
-              <button
-                type="button"
-                className="arr-btn arr-btn--ghost arr-btn--icon"
-                aria-label="Add Navidrome path mapping"
-                onClick={openAddNavidromeMapping}
-              >
-                <Plus className="artist-icon-sm" aria-hidden />
-              </button>
-            </div>
-          </>
+        <SettingsModalToggleGroup>
+          {["lastfm", "listenbrainz", "koito"].map((provider) => {
+            const status = scrobbleStatus?.[provider];
+            const label = provider === "lastfm"
+              ? status?.displayName
+                ? `Last.fm — ${status.displayName}`
+                : "Last.fm"
+              : provider === "listenbrainz"
+                ? "ListenBrainz"
+                : "Koito";
+            return (
+              <SettingsModalToggle
+                key={provider}
+                label={label}
+                checked={status?.connected === true}
+                disabled={!status}
+                onChange={(event) => handleScrobbleToggle(provider, event.target.checked)}
+              />
+            );
+          })}
+        </SettingsModalToggleGroup>
+        {scrobbleStatus && scrobbleStatus.lastfm?.configured !== true ? (
+          <SettingsModalCallout>
+            Last.fm API key and secret are required before connecting an account. Add them in{" "}
+            <Link to="/settings/connect" className="settings-page__link">
+              Settings → Connect → Last.fm
+            </Link>
+            .
+          </SettingsModalCallout>
         ) : null}
-
-        <p className="arr-form-help">
-          When using Weekly Flow: set Navidrome&apos;s <code>Scanner.PurgeMissing</code> to{" "}
-          <code>always</code> or <code>full</code> (e.g. <code>ND_SCANNER_PURGEMISSING=always</code>
-          ) so turning off a flow removes those tracks from the library.
-        </p>
       </SettingsArrFieldSet>
 
-      {navidromeMappingModal ? (
-        <NavidromePathMappingModal
-          title={
-            navidromeMappingModal.mode === "edit"
-              ? "Edit Navidrome Path Mapping"
-              : "Add Navidrome Path Mapping"
-          }
-          initialValue={
-            navidromeMappingModal.mode === "edit" && navidromeMappingModal.index != null
-              ? navidromePathMappings[navidromeMappingModal.index]
-              : undefined
-          }
-          onClose={closeNavidromeMappingModal}
-          onSave={saveNavidromeMapping}
-        />
-      ) : null}
+      {activeModal === "lastfm" && (
+        <SettingsIntegrationModal title="Last.fm scrobbling" onClose={closeModal}>
+          <SettingsModalIntro>
+            API key powers discovery. API secret is required for scrobbling.
+          </SettingsModalIntro>
+          {scrobbleStatus?.lastfm?.configured !== true ? (
+            <SettingsModalCallout>
+              Last.fm API key and secret are required first. Add them in{" "}
+              <Link to="/settings/connect" className="settings-page__link">
+                Settings → Connect → Last.fm
+              </Link>
+              .
+            </SettingsModalCallout>
+          ) : null}
+          <SettingsModalActions>
+            {scrobbleStatus?.lastfm?.configured === true ? (
+              <button type="button" className="arr-btn arr-btn--secondary" onClick={handleLastfmLink}>
+                {scrobbleStatus?.lastfm?.connected ? "Relink Last.fm" : "Connect Last.fm account"}
+              </button>
+            ) : null}
+            {scrobbleStatus?.lastfm?.connected ? (
+              <button type="button" className="arr-btn arr-btn--ghost" onClick={() => handleUnlink("lastfm")}>
+                Disconnect
+              </button>
+            ) : null}
+          </SettingsModalActions>
+        </SettingsIntegrationModal>
+      )}
+
+      {activeModal === "listenbrainz" && (
+        <SettingsIntegrationModal title="ListenBrainz scrobbling" onClose={closeModal}>
+          <SettingsModalIntro>
+            Enter a user token. Navidrome is not required.
+          </SettingsModalIntro>
+          <SettingsModalSection title="Connection">
+            <SettingsModalField label="User token">
+              <SettingsInput
+                type="password"
+                placeholder="ListenBrainz user token"
+                autoComplete="off"
+                value={listenBrainzToken}
+                onChange={(event) => setListenBrainzToken(event.target.value)}
+              />
+            </SettingsModalField>
+          </SettingsModalSection>
+          <SettingsModalActions>
+            <button type="button" className="arr-btn arr-btn--secondary" disabled={!listenBrainzToken} onClick={handleListenBrainzLink}>
+              Connect ListenBrainz
+            </button>
+            {scrobbleStatus?.listenbrainz?.connected ? (
+              <button type="button" className="arr-btn arr-btn--ghost" onClick={() => handleUnlink("listenbrainz")}>
+                Disconnect
+              </button>
+            ) : null}
+          </SettingsModalActions>
+        </SettingsIntegrationModal>
+      )}
+
+      {activeModal === "koito" && (
+        <SettingsIntegrationModal title="Koito scrobbling" onClose={closeModal}>
+          <SettingsModalIntro>Koito uses the ListenBrainz format.</SettingsModalIntro>
+          <SettingsModalSection title="Connection">
+            <SettingsModalField label="Koito URL">
+              <SettingsInput type="url" placeholder="https://koito.example.com" value={koitoUrl} onChange={(event) => setKoitoUrl(event.target.value)} />
+            </SettingsModalField>
+            <SettingsModalField label="API key">
+              <SettingsInput type="password" placeholder="Koito API key" autoComplete="off" value={koitoToken} onChange={(event) => setKoitoToken(event.target.value)} />
+            </SettingsModalField>
+          </SettingsModalSection>
+          <SettingsModalActions>
+            <button type="button" className="arr-btn arr-btn--secondary" disabled={!koitoToken} onClick={handleKoitoLink}>
+              Connect Koito
+            </button>
+            {scrobbleStatus?.koito?.connected ? (
+              <button type="button" className="arr-btn arr-btn--ghost" onClick={() => handleUnlink("koito")}>
+                Disconnect
+              </button>
+            ) : null}
+          </SettingsModalActions>
+        </SettingsIntegrationModal>
+      )}
 
       {activeModal === "navidrome" && (
         <SettingsIntegrationModal
           title="Subsonic / Navidrome"
           onClose={closeModal}
+          testStatus={testStatus}
           footerActions={
             <button
               type="button"
               className="btn btn-secondary"
               onClick={handleTestNavidrome}
-              disabled={testingNavidrome || !navidrome.url || !navidrome.username}
+              disabled={testingNavidrome || !navidrome.url || !navidrome.username || !navidrome.password}
             >
-              <RefreshCw className={`artist-icon-sm${testingNavidrome ? " animate-spin" : ""}`} />
+              {testingNavidrome ? (
+                <DotLoader size="sm" label={null} />
+              ) : (
+                <RefreshCw className="artist-icon-sm" aria-hidden />
+              )}
               {testingNavidrome ? "Testing…" : "Test connection"}
             </button>
           }
         >
           <SettingsModalSection title="Connection">
-            <SettingsModalField label="Server URL">
-              <SettingsInput
-                type="url"
-                placeholder="https://music.example.com"
-                autoComplete="off"
-                value={navidrome.url || ""}
-                onChange={(event) => updateNavidrome({ url: event.target.value })}
-              />
-            </SettingsModalField>
-            <SettingsModalField label="Username">
-              <SettingsInput
-                type="text"
-                autoComplete="off"
-                value={navidrome.username || ""}
-                onChange={(event) => updateNavidrome({ username: event.target.value })}
-              />
-            </SettingsModalField>
-            <SettingsModalField label="Password">
-              <SettingsInput
-                type="password"
-                autoComplete="off"
-                value={navidrome.password || ""}
-                onChange={(event) => updateNavidrome({ password: event.target.value })}
-              />
-            </SettingsModalField>
+            <SettingsAdapterFields
+              definition={playbackSettings?.navidrome}
+              settings={navidrome}
+              onChange={updateNavidrome}
+            />
+          </SettingsModalSection>
+        </SettingsIntegrationModal>
+      )}
+
+      {activeModal === "jellyfin" && (
+        <SettingsIntegrationModal
+          title="Jellyfin"
+          onClose={closeModal}
+          testStatus={testStatus}
+          footerActions={
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={handleTestJellyfin}
+              disabled={testingJellyfin || !jellyfin.url || !jellyfin.apiKey || !jellyfin.userId}
+            >
+              {testingJellyfin ? (
+                <DotLoader size="sm" label={null} />
+              ) : (
+                <RefreshCw className="artist-icon-sm" aria-hidden />
+              )}
+              {testingJellyfin ? "Testing…" : "Test connection"}
+            </button>
+          }
+        >
+          <SettingsModalIntro>
+            Connect Jellyfin to publish Aurral flow and shared playlists into its music library.
+          </SettingsModalIntro>
+          <SettingsModalSection title="Connection">
+            <SettingsAdapterFields
+              definition={playbackSettings?.jellyfin}
+              settings={jellyfin}
+              onChange={updateJellyfin}
+            />
           </SettingsModalSection>
         </SettingsIntegrationModal>
       )}
@@ -551,6 +697,7 @@ export function SettingsPlaybackSection({
         <SettingsIntegrationModal
           title="Plex"
           onClose={closeModal}
+          testStatus={testStatus}
           footerActions={
             <button
               type="button"
@@ -558,15 +705,17 @@ export function SettingsPlaybackSection({
               onClick={handleTestPlex}
               disabled={testingPlex || !plex.url || !plex.token}
             >
-              <RefreshCw className={`artist-icon-sm${testingPlex ? " animate-spin" : ""}`} />
+              {testingPlex ? (
+                <DotLoader size="sm" label={null} />
+              ) : (
+                <RefreshCw className="artist-icon-sm" aria-hidden />
+              )}
               {testingPlex ? "Testing…" : "Test connection"}
             </button>
           }
         >
           <SettingsModalIntro>
-            Sign in with your Plex account to let Aurral create a dedicated music library pointed at
-            your flow downloads and build a playlist for each flow. Playlists appear in Plex and
-            Plexamp.
+            Connect Plex to create a library and playlists for Aurral flows.
           </SettingsModalIntro>
 
           <SettingsModalSection title="Account">
@@ -617,6 +766,11 @@ export function SettingsPlaybackSection({
           </SettingsModalSection>
 
           <SettingsModalSection title="Connection">
+            <SettingsAdapterFields
+              definition={playbackSettings?.plex}
+              settings={plex}
+              onChange={updatePlex}
+            />
             {plex.token && (
               <SettingsModalField label="Plex server">
                 <SettingsSelect
@@ -640,29 +794,15 @@ export function SettingsPlaybackSection({
                 </SettingsSelect>
               </SettingsModalField>
             )}
-            <SettingsModalField
-              label="Server URL"
-              hint="Auto-filled when you select a server, or enter it manually."
-            >
-              <SettingsInput
-                type="url"
-                placeholder="http://localhost:32400"
-                autoComplete="off"
-                value={plex.url || ""}
-                onChange={(event) => updatePlex({ url: event.target.value })}
-              />
-            </SettingsModalField>
           </SettingsModalSection>
 
-          <SettingsModalSection title="Aurral Library Path">
+          <SettingsModalSection title="Aurral library path">
             <SettingsModalField
               label="Plex Aurral Library path (optional)"
               hint={
                 <>
-                  Only needed if Plex runs in a different container/host than Aurral. Enter the
-                  downloads folder path as the <strong>Plex server</strong> sees it — Aurral appends{" "}
-                  <code>/aurral-weekly-flow</code>. Leave blank to use Aurral&apos;s own download
-                  path.
+                  Only needed when Plex sees downloads at a different path. Enter the Plex-side
+                  path to the Aurral Downloads Folder.
                 </>
               }
             >
@@ -704,9 +844,8 @@ export function SettingsPlaybackSection({
               label="Include tracks from an existing library"
               hint={
                 <>
-                  If a flow includes songs you already have in another Plex library — like the
-                  one Lidarr manages — Aurral needs this library selected to reuse those songs in
-                  Plex playlists; without it, the tracks are silently left out of the playlist.
+                  Include an existing Plex library so playlists can reuse tracks already in your
+                  Lidarr library.
                 </>
               }
             >
@@ -726,7 +865,7 @@ export function SettingsPlaybackSection({
 
             {plex.mainLibrarySectionId && libraryAccessCheck?.checking ? (
               <p className="settings-modal__hint">
-                <RefreshCw className="artist-icon-xs" aria-hidden /> Checking whether Aurral can
+                <DotLoader size="xs" label={null} /> Checking whether Aurral can
                 already read this library…
               </p>
             ) : null}
@@ -755,10 +894,7 @@ export function SettingsPlaybackSection({
                 label="Local path for this library (optional)"
                 hint={
                   <>
-                    Plex reports this library&apos;s files at{" "}
-                    <code>{libraryAccessCheck?.reportedPath || plexLibraryMapping?.remote}</code>.
-                    Enter that same folder as <strong>Aurral</strong> sees it. Leave blank to
-                    remove this mapping.
+                    Enter the same path as Aurral sees it; leave blank to remove the mapping.
                   </>
                 }
               >
@@ -804,13 +940,12 @@ export function SettingsPlaybackSection({
                 onClick={handleSyncPlex}
                 disabled={syncingPlex || !plex.url || !plex.token}
               >
+                {syncingPlex ? <DotLoader size="sm" label={null} /> : null}
                 {syncingPlex ? "Syncing…" : "Sync to Plex now"}
               </button>
             </SettingsModalActions>
             <p className="settings-modal__hint">
-              Creates an &quot;Aurral&quot; music library pointed at your downloads, scans it, and
-              builds a playlist per flow. The Plex server must be able to read the same downloads
-              path Aurral writes to. Changes save automatically before syncing.
+              Creates the Aurral library and flow playlists, then scans Plex. Saves before syncing.
             </p>
           </SettingsModalSection>
         </SettingsIntegrationModal>

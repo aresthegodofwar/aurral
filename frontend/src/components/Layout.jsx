@@ -8,6 +8,7 @@ import {
   Ellipsis,
   Ticket,
   AudioWaveform,
+  Workflow,
   Settings,
   LogOut,
   User,
@@ -17,6 +18,7 @@ import GlobalSearch from "./GlobalSearch";
 import GlobalPlayerBar from "./GlobalPlayerBar";
 import UserProfileMenu from "./UserProfileMenu";
 import InboxMenu from "./InboxMenu";
+import TooltipButton from "./TooltipButton";
 import { useAuth } from "../contexts/AuthContext";
 import { useAudioQueue } from "../contexts/audioQueueContext";
 import { DEFAULT_SETTINGS_TAB } from "../pages/Settings/settingsTabsConfig";
@@ -121,6 +123,9 @@ function Layout({ children, headerActions }) {
       if (path.startsWith("/shows")) {
         return location.pathname.startsWith("/shows");
       }
+      if (path.startsWith("/flows")) {
+        return location.pathname.startsWith("/flows");
+      }
       if (path.startsWith("/activity")) {
         return location.pathname.startsWith("/activity");
       }
@@ -152,6 +157,12 @@ function Layout({ children, headerActions }) {
   const mobileOverflowItems = useMemo(() => {
     const items = [
       { path: "/shows/all", label: "Shows", icon: Ticket },
+      {
+        path: "/flows",
+        label: "Flows",
+        icon: Workflow,
+        permission: "accessFlow",
+      },
       { path: "/activity/queue", label: "Activity", icon: Activity },
       { path: "/profile", label: "Profile", icon: User },
       {
@@ -408,15 +419,14 @@ function Layout({ children, headerActions }) {
         }${isPlayerActive ? " app-content--player-active" : ""}`}
       >
         <header className="app-topbar">
-          <button
+          <TooltipButton
+            label={sidebarMode === "icons" ? "Expand sidebar" : "Collapse to icons"}
             type="button"
             onClick={toggleSidebarPin}
             className="app-nav-toggle"
-            aria-label={sidebarMode === "icons" ? "Expand sidebar" : "Collapse to icons"}
-            title={sidebarMode === "icons" ? "Expand sidebar" : "Collapse to icons"}
           >
             <Menu aria-hidden="true" />
-          </button>
+          </TooltipButton>
 
           <GlobalSearch settingsMode={isSettingsRoute} />
 
@@ -490,6 +500,7 @@ function Layout({ children, headerActions }) {
                       ref={index === 0 ? mobileMenuInitialFocusRef : undefined}
                       to={item.path}
                       className={`app-mobile-menu__item${active ? " is-active" : ""}`}
+                      aria-current={active ? "page" : undefined}
                     >
                       <Icon aria-hidden="true" />
                       <span>{item.label}</span>
@@ -524,6 +535,7 @@ function Layout({ children, headerActions }) {
                   key={item.path}
                   to={item.path}
                   className={`app-mobile-nav__item${active ? " is-active" : ""}`}
+                  aria-current={active ? "page" : undefined}
                 >
                   <Icon aria-hidden="true" />
                   <span>{item.label}</span>

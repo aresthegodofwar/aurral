@@ -49,6 +49,14 @@ const buildListenHistoryUpdates = (body, existing) => {
         : existing.listenHistoryProvider,
   );
 
+  if (provider === "local") {
+    return {
+      listenHistoryProvider: "local",
+      listenHistoryUsername: null,
+      listenHistoryUrl: null,
+    };
+  }
+
   if (provider === "koito") {
     const rawUrl = hasListenHistoryUrlUpdate ? body.listenHistoryUrl : existing.listenHistoryUrl;
     const trimmedUrl = normalizeListenHistoryUrl(rawUrl);
@@ -202,7 +210,7 @@ router.post("/", requireAuth, requireAdmin, async (req, res) => {
     }
     const hash = hashPassword(password);
     const perms = permissions ? { ...userOps.getDefaultPermissions(), ...permissions } : null;
-    const created = userOps.createUser(un, hash, role, perms, true);
+    const created = userOps.createUser(un, hash, role, perms, true, false, password);
     if (!created) {
       return res.status(500).json({ error: "Failed to create user" });
     }
@@ -278,6 +286,7 @@ router.patch("/:id", requireAuth, async (req, res) => {
         }
         updates.passwordHash = hashPassword(password);
         updates.hasLocalPassword = true;
+        updates.subsonicPassword = password;
       }
       if (Object.keys(updates).length === 0) {
         return res.json({
@@ -312,6 +321,7 @@ router.patch("/:id", requireAuth, async (req, res) => {
       }
       updates.passwordHash = hashPassword(password);
       updates.hasLocalPassword = true;
+      updates.subsonicPassword = password;
     }
     if (permissions !== undefined) updates.permissions = permissions;
     if (role !== undefined) {
@@ -397,6 +407,55 @@ router.get("/me/lidarr-preferences", requireAuth, async (req, res) => {
   } catch (e) {
     res.status(500).json({
       error: "Failed to get Lidarr preferences",
+      message: e.message,
+    });
+  }
+});
+
+router.get("/me/library-owner", requireAuth, async (req, res) => {
+  try {
+    const user = userOps.getUserById(req.user.id);
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+    const { lidarrClient } = await import("../services/lidarrClient.js");
+    const stored = user.defaultLibraryOwner || null;
+    const resolved =
+      stored || (lidarrClient.isConfigured() ? "lidarr" : "aurral");
+    res.json({ defaultLibraryOwner: resolved, storedDefaultLibraryOwner: stored });
+  } catch (e) {
+    res.status(500).json({
+      error: "Failed to get library owner preference",
+      message: e.message,
+    });
+  }
+});
+
+router.post("/me/library-owner", requireAuth, async (req, res) => {
+  try {
+    const requested = req.body?.defaultLibraryOwner;
+    if (requested !== null && requested !== undefined && requested !== "") {
+      const normalized = String(requested).trim().toLowerCase();
+      if (normalized !== "aurral" && normalized !== "lidarr") {
+        return res.status(400).json({
+          error: "defaultLibraryOwner must be 'aurral' or 'lidarr'",
+        });
+      }
+    }
+    const updated = userOps.updateUser(req.user.id, {
+      defaultLibraryOwner: requested == null || requested === "" ? null : requested,
+    });
+    if (!updated) {
+      return res.status(404).json({ error: "User not found" });
+    }
+    const { lidarrClient } = await import("../services/lidarrClient.js");
+    const stored = updated.defaultLibraryOwner || null;
+    const resolved =
+      stored || (lidarrClient.isConfigured() ? "lidarr" : "aurral");
+    res.json({ defaultLibraryOwner: resolved, storedDefaultLibraryOwner: stored });
+  } catch (e) {
+    res.status(500).json({
+      error: "Failed to save library owner preference",
       message: e.message,
     });
   }
@@ -574,7 +633,11 @@ router.post("/me/password", requireAuth, requireRecentAuth(), async (req, res) =
       return res.status(400).json({ error: "Current password is incorrect" });
     }
     const hash = hashPassword(newPassword);
-    userOps.updateUser(req.user.id, { passwordHash: hash, hasLocalPassword: true });
+    userOps.updateUser(req.user.id, {
+      passwordHash: hash,
+      hasLocalPassword: true,
+      subsonicPassword: newPassword,
+    });
     deleteSessionsByUserId(req.user.id);
     res.json({ success: true });
   } catch (e) {

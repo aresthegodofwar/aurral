@@ -58,9 +58,9 @@ If a service uses a separate path for its own database or configuration, keep th
 
 1. Aurral asks a download client to find the track.
 2. The download client writes the completed file under `/data/downloads/...`.
-3. Aurral reads that file and moves it to `/data/downloads/aurral/aurral-weekly-flow/...`.
-4. Aurral writes a playlist file next to the downloaded tracks.
-5. Navidrome scans `/data/downloads/aurral/aurral-weekly-flow` and can play the tracks.
+3. Aurral imports the file into its Downloads Folder. Permanent tracks use `artist/album/track`; flow tracks use `_flows/<flow-id>/artist/album/track`.
+4. Aurral stores playlist artwork and sidecars under `aurral-weekly-flow/_playlists`. This folder is not part of the canonical Library.
+5. Navidrome scans the Downloads Folder and can play the tracks.
 
 If Aurral writes a file as `/data/downloads/aurral/track.flac` but Navidrome sees the same host folder as `/downloads/track.flac`, Navidrome cannot open the path in Aurral's playlist file. The API connection can still work, but the playlist will be empty or the tracks will not play. Use matching container paths, or follow [When paths cannot match](#when-paths-cannot-match).
 
@@ -86,7 +86,9 @@ Choose one directory on the Docker host as the media root. The example uses `/sr
     |-- slskd/complete/             # optional Soulseek completed files
     |-- usenet/complete/            # optional SABnzbd or NZBGet files
     \-- aurral/                     # Aurral Downloads Folder
-        \-- aurral-weekly-flow/     # generated tracks and playlists
+        |-- Artist/Album/track      # permanent canonical tracks
+        |-- _flows/flow-id/...      # temporary flow tracks
+        \-- aurral-weekly-flow/     # playlist sidecars and artwork
 ```
 
 Use the same host directory in every media-service mount:
@@ -156,8 +158,8 @@ After you add the mounts, use the container paths shown below.
 | Lidarr | Root folder | `/data/music` |
 | slskd | Completed download folder | `/data/downloads/slskd/complete` |
 | SABnzbd or NZBGet | Completed download folder | `/data/downloads/usenet/complete` |
-| Aurral | **Settings > Download Clients > Downloads Folder > Path** | `/data/downloads/aurral` |
-| Navidrome | Aurral playlist library | Aurral creates `/data/downloads/aurral/aurral-weekly-flow` through the API. |
+| Aurral | **Settings > Download clients > Downloads Folder > Path** | `/data/downloads/aurral` |
+| Navidrome | Aurral library | Aurral creates `/data/downloads/aurral` through the API. |
 | Plex | Aurral library | Aurral creates the library through the API at the path Plex uses for the Aurral Downloads Folder. |
 
 The exact download-client folder names are not important. The important rules are:
@@ -168,16 +170,16 @@ The exact download-client folder names are not important. The important rules ar
 
 ## Setup order
 
-Follow this order. It makes each filesystem connection easy to check.
+Follow this order so you can check each filesystem connection separately.
 
 1. Choose the host media root, such as `/srv/media`.
 2. Mount that same host directory in Aurral, Lidarr, every download client, and the playback server you use.
 3. Use `/data/...` paths inside the containers. Set the Lidarr root folder and the completed download folders.
 4. Start the services.
 5. In Aurral, open **Settings > Lidarr**, enter the URL and API key, and select **Test connection**.
-6. In Aurral, open **Settings > Download Clients** and set **Downloads Folder > Path** to a writable folder under `/data`, such as `/data/downloads/aurral`.
+6. In Aurral, open **Settings > Download clients** and set **Downloads Folder > Path** to a writable folder under `/data`, such as `/data/downloads/aurral`.
 7. Connect and test each download client that you use.
-8. Open **Settings > System > Storage Health** and select **Run Checks**. Fix any failed library, download, or transfer check.
+8. Open **Settings > Storage health** and select **Run Checks**. Fix any failed library, download, or transfer check.
 9. Open **Settings > Playback**, connect Navidrome or Plex, and follow the path rules below.
 
 ## Verify the two connections
@@ -185,14 +187,15 @@ Follow this order. It makes each filesystem connection easy to check.
 Use these checks in order:
 
 1. **API check:** each integration's **Test connection** button must pass.
-2. **File check:** **Settings > Lidarr > Test library access** and **Settings > System > Storage Health** must be able to read the paths.
+2. **File check:** **Settings > Lidarr > Test library access** and **Settings > Storage health** must be able to read the paths.
 3. **Output check:** after a flow or playlist downloads a track, the file must exist under:
 
    ```text
-   /data/downloads/aurral/aurral-weekly-flow/
+   /data/downloads/aurral/Artist/Album/Track.flac
+   /data/downloads/aurral/_flows/<flow-id>/Artist/Album/Track.flac
    ```
 
-4. **Playback check:** Navidrome or Plex must have that folder in its own filesystem and must scan it.
+4. **Playback check:** Navidrome or Plex must have the Downloads Folder in its own filesystem and must scan it.
 
 If the API check passes but the file check fails, do not change the API URL. Fix the volume mapping, permissions, or path mapping.
 
@@ -202,7 +205,7 @@ Different container paths can work, but each mismatch needs its own setting. A p
 
 ### Paths reported by Lidarr or download clients
 
-Use **Settings > Download Clients > Remote Path Mappings**. Enter:
+Use **Settings > Download clients > Remote Path Mappings**. Enter:
 
 - **Remote Path**: the absolute path reported by the other application.
 - **Local Path**: the path for the same folder inside Aurral.
@@ -222,20 +225,9 @@ For a native Windows service, the remote path can be `N:\ServerFolders\Music`. M
 
 ### Navidrome sees a different path
 
-This is a separate mapping. It changes paths in generated `.m3u` files; it does not help Aurral read Lidarr or download-client paths.
+Aurral uses the Subsonic API for playlists. There is no Navidrome playlist path mapping in Aurral.
 
-1. Open **Settings > Playback > Navidrome**.
-2. Enable **Use Navidrome paths in M3U files**.
-3. Add a mapping with **Aurral Path** set to the path Aurral uses and **Navidrome Path** set to the path Navidrome uses.
-
-Example:
-
-| | Value |
-| --- | --- |
-| Aurral Path | `/data/downloads/aurral` |
-| Navidrome Path | `/music/aurral` |
-
-Leave this setting off when both containers use `/data` for the same host folder.
+Mount Aurral's download tree at the same absolute path in both containers so Aurral can manage the **Aurral Playlists** library. Reused music libraries may use different paths because Aurral finds indexed songs by metadata.
 
 ### Plex sees a different path
 
@@ -243,7 +235,7 @@ This is also separate from Aurral's Remote Path Mappings.
 
 1. Open **Settings > Playback > Plex**.
 2. Set **Plex Aurral Library path** to the Downloads Folder path as Plex sees it.
-3. Do not include `/aurral-weekly-flow`; Aurral adds that folder.
+3. Enter the Downloads Folder path only. Do not add `/aurral-weekly-flow`.
 4. After the settings save automatically, select **Sync to Plex now**.
 
 Example:
@@ -260,10 +252,10 @@ The same rule applies when one service runs on Windows:
 
 1. Mount the Windows media folder into Aurral.
 2. Add a **Remote Path Mapping** from the Windows path reported by Lidarr or the download client to the Aurral container path.
-3. If Navidrome also runs on Windows, add a separate Navidrome M3U mapping so generated playlists contain Windows paths.
+3. If Navidrome also runs on Windows, add the corresponding folders as Navidrome music libraries.
 4. If Plex sees a different path, set **Plex Aurral Library path** to the Plex path.
 
-Do not use one mapping for all three jobs. A Lidarr mapping, a Navidrome M3U mapping, and the Plex library path solve different path translations.
+Do not use one mapping for all three jobs. A Lidarr mapping, a Navidrome library path, and the Plex library path solve different filesystem views.
 
 ## Common incorrect layouts
 

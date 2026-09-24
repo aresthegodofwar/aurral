@@ -7,11 +7,12 @@ import {
   setCoverCacheEntry,
   coverInflightRequests,
 } from "../core.js";
+import { queryClient, queryKeys } from "../../../queryClient.js";
 
-export const getArtistDetails = async (
+const fetchArtistDetails = async (
   mbid,
   artistName,
-  { mode = "", releaseTypes = [], appearsOnLimit = null } = {},
+  { mode = "", releaseTypes = [], appearsOnLimit = null, signal } = {},
 ) => {
   const params = {};
   if (artistName) {
@@ -28,24 +29,51 @@ export const getArtistDetails = async (
   }
   return getData(`/artists/${mbid}`, {
     params,
+    signal,
   });
 };
 
-export const getReleaseGroupDetails = (mbid) =>
-  getData(`/artists/release-group/${mbid}`);
+export const getArtistDetails = (mbid, artistName, options = {}) =>
+  queryClient.fetchQuery({
+    queryKey: queryKeys.artistDetails(mbid, {
+      artistName,
+      mode: options.mode,
+      releaseTypes: options.releaseTypes,
+      appearsOnLimit: options.appearsOnLimit,
+    }),
+    queryFn: ({ signal }) => fetchArtistDetails(mbid, artistName, { ...options, signal }),
+    staleTime: 60_000,
+  });
+
+export const getReleaseGroupDetails = (mbid, { signal } = {}) =>
+  getData(`/artists/release-group/${mbid}`, { signal });
 
 export const getArtistAppearsOnPage = (
   mbid,
-  { offset = 0, limit = 24, excludeIds = [] } = {},
+  { offset = 0, limit = 24, excludeIds = [], signal } = {},
 ) =>
   postData(`/artists/${mbid}/appears-on`, {
     offset,
     limit,
     excludeIds: Array.isArray(excludeIds) ? excludeIds : [],
-  });
+  }, { signal });
 
-export const getReleaseGroupRatingsBatch = (ids = []) =>
-  postData("/artists/release-groups/ratings", { ids });
+export const getReleaseGroupRatingsBatch = (ids = []) => {
+  const normalizedIds = [...new Set((Array.isArray(ids) ? ids : []).filter(Boolean))];
+  if (!normalizedIds.length) return Promise.resolve({ ratings: {} });
+  return queryClient.fetchQuery({
+    queryKey: queryKeys.releaseGroupRatings(normalizedIds),
+    queryFn: () => postData("/artists/release-groups/ratings", { ids: normalizedIds }),
+    staleTime: 5 * 60 * 1000,
+  });
+};
+
+const RELEASE_GROUP_COVER_BATCH_SIZE = 24;
+
+const normalizeCoverPart = (value) => String(value || "").trim().toLowerCase();
+
+const releaseGroupCoverCacheKey = (mbid, artistName = "", albumTitle = "") =>
+  `release-group:${mbid}:${normalizeCoverPart(artistName)}:${normalizeCoverPart(albumTitle)}`;
 
 export const getReleaseGroupTracks = async (mbid, context = {}) => {
   const params = {};
@@ -57,6 +85,7 @@ export const getReleaseGroupTracks = async (mbid, context = {}) => {
   if (context.deezerAlbumId) params.deezerAlbumId = context.deezerAlbumId;
   return getData(`/artists/release-group/${mbid}/tracks`, {
     params,
+    signal: context.signal,
   });
 };
 
@@ -93,6 +122,16 @@ export const getReleaseGroupCoversBatch = async (items = []) => {
   if (!normalizedItems.length) {
     return {};
   }
+  const covers = {};
+  const uncachedItems = [];
+  normalizedItems.forEach((item) => {
+    const cached = getCoverCacheEntry(
+      releaseGroupCoverCacheKey(item.mbid, item.artistName, item.albumTitle),
+    );
+    if (cached) covers[item.mbid] = cached;
+    else uncachedItems.push(item);
+  });
+  if (!uncachedItems.length) return covers;
   const batchKey = normalizedItems
     .map(
       (item) =>
@@ -103,10 +142,26 @@ export const getReleaseGroupCoversBatch = async (items = []) => {
   if (coverInflightRequests.has(batchKey)) {
     return coverInflightRequests.get(batchKey);
   }
-  const request = postData("/artists/release-groups/covers", {
-    items: normalizedItems,
-  })
-    .then((data) => data?.covers || {})
+  const request = (async () => {
+    for (let index = 0; index < uncachedItems.length; index += RELEASE_GROUP_COVER_BATCH_SIZE) {
+      const batch = uncachedItems.slice(index, index + RELEASE_GROUP_COVER_BATCH_SIZE);
+      const data = await postData("/artists/release-groups/covers", {
+        items: batch,
+      });
+      const batchCovers = data?.covers || {};
+      Object.assign(covers, batchCovers);
+      Object.entries(batchCovers).forEach(([mbid, cover]) => {
+        const item = batch.find((candidate) => candidate.mbid === mbid);
+        if (item && !cover?.transientError) {
+          setCoverCacheEntry(
+            releaseGroupCoverCacheKey(mbid, item.artistName, item.albumTitle),
+            cover,
+          );
+        }
+      });
+    }
+    return covers;
+  })()
     .finally(() => {
       coverInflightRequests.delete(batchKey);
     });
@@ -118,19 +173,22 @@ export const getReleaseGroupCover = async (
   mbid,
   { artistName = "", albumTitle = "", bypassCache = false } = {},
 ) => {
-  const normalizedArtistName =
-    typeof artistName === "string" ? artistName.trim().toLowerCase() : "";
-  const normalizedAlbumTitle =
-    typeof albumTitle === "string" ? albumTitle.trim().toLowerCase() : "";
-  const cacheKey = `release-group:${mbid}:${normalizedArtistName}:${normalizedAlbumTitle}`;
+  const cacheKey = releaseGroupCoverCacheKey(mbid, artistName, albumTitle);
+  const refreshKey = `${cacheKey}:refresh`;
   if (!bypassCache) {
+    const refresh = coverInflightRequests.get(refreshKey);
+    if (refresh) return refresh;
     const cached = getCoverCacheEntry(cacheKey);
     if (cached) {
       return cached;
     }
+  } else {
+    const normal = coverInflightRequests.get(cacheKey);
+    if (normal) await normal.catch(() => undefined);
   }
-  if (coverInflightRequests.has(cacheKey)) {
-    return coverInflightRequests.get(cacheKey);
+  const inflightKey = bypassCache ? refreshKey : cacheKey;
+  if (coverInflightRequests.has(inflightKey)) {
+    return coverInflightRequests.get(inflightKey);
   }
   const request = (async () => {
     const params = {};
@@ -140,6 +198,9 @@ export const getReleaseGroupCover = async (
     if (typeof albumTitle === "string" && albumTitle.trim()) {
       params.albumTitle = albumTitle.trim();
     }
+    if (bypassCache) {
+      params.refresh = true;
+    }
     const data = await getData(`/artists/release-group/${mbid}/cover`, {
       params,
     });
@@ -148,13 +209,13 @@ export const getReleaseGroupCover = async (
     }
     return data;
   })().finally(() => {
-    coverInflightRequests.delete(cacheKey);
+    coverInflightRequests.delete(inflightKey);
   });
-  coverInflightRequests.set(cacheKey, request);
+  coverInflightRequests.set(inflightKey, request);
   return request;
 };
 
-export const getSimilarArtistsForArtist = (
+const fetchSimilarArtistsForArtist = (
   mbid,
   artistName = "",
   limit = 20,
@@ -166,6 +227,13 @@ export const getSimilarArtistsForArtist = (
         ? { artistName: artistName.trim() }
         : {}),
     },
+  });
+
+export const getSimilarArtistsForArtist = (mbid, artistName = "", limit = 20) =>
+  queryClient.fetchQuery({
+    queryKey: queryKeys.artistSimilar(mbid, artistName, limit),
+    queryFn: () => fetchSimilarArtistsForArtist(mbid, artistName, limit),
+    staleTime: 5 * 60 * 1000,
   });
 
 export const getArtistPreview = (mbid, artistName, options = {}) =>
@@ -185,14 +253,26 @@ export const getArtistTopSongVideo = (
     signal: options.signal,
   });
 
-export const getArtistOverrides = (mbid) =>
-  getData(`/artists/${mbid}/overrides`);
+export const fetchArtistOverrides = (mbid, { signal } = {}) =>
+  getData(`/artists/${mbid}/overrides`, { signal });
 
-export const updateArtistOverrides = (
+export const getArtistOverrides = (mbid) =>
+  queryClient.fetchQuery({
+    queryKey: queryKeys.artistOverrides(mbid),
+    queryFn: ({ signal }) => fetchArtistOverrides(mbid, { signal }),
+    staleTime: 30_000,
+  });
+
+export const updateArtistOverrides = async (
   mbid,
   { musicbrainzId = null, deezerArtistId = null } = {},
-) =>
-  putData(`/artists/${mbid}/overrides`, {
+) => {
+  const result = await putData(`/artists/${mbid}/overrides`, {
     musicbrainzId,
     deezerArtistId,
   });
+  queryClient.setQueryData(queryKeys.artistOverrides(mbid), result);
+  await queryClient.invalidateQueries({ queryKey: queryKeys.artistDetailsPrefix });
+  await queryClient.invalidateQueries({ queryKey: queryKeys.artistSimilarPrefix });
+  return result;
+};

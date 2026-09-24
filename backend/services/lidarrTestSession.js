@@ -7,6 +7,11 @@ export function resolveLidarrTestCredentials(query = {}, configuredClient = null
     return { url: testUrl, apiKey: testApiKey, usingProvided: true };
   }
   configuredClient?.updateConfig?.();
+  if (configuredClient?.isEnabled?.() === false) {
+    const error = new Error("Lidarr is disabled");
+    error.statusCode = 400;
+    throw error;
+  }
   const config = configuredClient?.getConfig?.() || {};
   return {
     url: String(config.url || "").trim(),
@@ -27,10 +32,10 @@ export function validateLidarrTestCredentials(url, apiKey) {
 }
 
 export async function withTemporaryLidarrClient(url, apiKey, fn) {
-  const { lidarrClient } = await import("./lidarrClient.js");
-  const originalConfig = { ...lidarrClient.config };
-  const originalApiPath = lidarrClient.apiPath;
-  const originalHoldConfig = lidarrClient._holdConfig;
+  const { LidarrClient } = await import("./lidarrClient.js");
+  // Keep test credentials, cached responses and discovered paths out of the saved client.
+  const lidarrClient = new LidarrClient({ persistRootFolderPaths: false });
+  const originalConfig = lidarrClient.config;
 
   lidarrClient._holdConfig = true;
   lidarrClient.config = {
@@ -39,15 +44,16 @@ export async function withTemporaryLidarrClient(url, apiKey, fn) {
     insecure: originalConfig.insecure,
     timeoutMs: originalConfig.timeoutMs,
     circuitDisabled: true,
+    rootFolderPath: null,
+    rootFolderPaths: [],
   };
   lidarrClient.apiPath = "/api/v1";
 
   try {
     return await fn(lidarrClient);
   } finally {
-    lidarrClient._holdConfig = originalHoldConfig;
-    lidarrClient.config = originalConfig;
-    lidarrClient.apiPath = originalApiPath;
-    lidarrClient.updateConfig();
+    lidarrClient._httpAgent.destroy();
+    lidarrClient._httpsAgent.destroy();
+    lidarrClient._httpsInsecureAgent.destroy();
   }
 }

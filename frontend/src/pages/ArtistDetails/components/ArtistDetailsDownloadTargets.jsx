@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Loader, Music, Star } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import { Music, Star } from "lucide-react";
+import { DotLoader } from "../../../components/DotLoader";
 import AddActionButton from "../../../components/AddActionButton";
 import { getReleaseGroupTracks } from "../../../utils/api/endpoints/artists.js";
 import { buildAurralPick, getReleaseGroupCoverUrl, getReleaseMetric } from "../utils";
@@ -9,6 +11,7 @@ import { ArtistTrackListToolbar } from "./ArtistTrackListToolbar";
 import { useAlbumTrackListToolbar } from "../../../hooks/useAlbumTrackListToolbar";
 import { useAudioQueue } from "../../../contexts/audioQueueContext";
 import { normalizePreviewTrack } from "../../../utils/audioQueue";
+import { queryKeys } from "../../../queryClient.js";
 
 function PickCover({ pick, albumCovers, fulfilledCoverIds, artistCoverImage }) {
   const cover = getReleaseGroupCoverUrl(pick?.releaseGroup, albumCovers, {
@@ -47,6 +50,8 @@ export function ArtistDetailsDownloadTargets({
   artistName = "",
   playbackSource = null,
   onAddTrackToPlaylist,
+  onAddTrackToLibrary,
+  libraryTrackSavingKeys,
   resolveMembershipTrack,
   playlists,
   playlistsLoading,
@@ -59,50 +64,37 @@ export function ArtistDetailsDownloadTargets({
     () => buildAurralPick({ releaseGroups, getAlbumStatus }),
     [releaseGroups, getAlbumStatus],
   );
-  const [tracks, setTracks] = useState([]);
-  const [loadingTracks, setLoadingTracks] = useState(false);
   const [showAllTracks, setShowAllTracks] = useState(false);
-  useEffect(() => {
-    const releaseGroupId = missingReleasePick?.releaseGroupId;
-    const releaseGroup = missingReleasePick?.releaseGroup;
-    if (!releaseGroupId) {
-      setTracks([]);
-      setLoadingTracks(false);
-      return;
-    }
-
-    let cancelled = false;
-    setLoadingTracks(true);
-    setTracks([]);
-    getReleaseGroupTracks(releaseGroupId, {
+  const releaseGroup = missingReleasePick?.releaseGroup;
+  const trackContext = useMemo(
+    () => ({
       artistMbid: artist?.id || "",
       artistName: artist?.name || "",
       albumTitle: missingReleasePick?.title || releaseGroup?.title || "",
       releaseType: missingReleasePick?.type || releaseGroup?.["primary-type"] || "",
       releaseDate: releaseGroup?.["first-release-date"] || "",
       deezerAlbumId: releaseGroup?._deezerAlbumId || "",
-    })
-      .then((nextTracks) => {
-        if (!cancelled) setTracks(Array.isArray(nextTracks) ? nextTracks : []);
-      })
-      .catch(() => {
-        if (!cancelled) setTracks([]);
-      })
-      .finally(() => {
-        if (!cancelled) setLoadingTracks(false);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    artist?.id,
-    artist?.name,
-    missingReleasePick?.releaseGroup,
-    missingReleasePick?.releaseGroupId,
-    missingReleasePick?.title,
-    missingReleasePick?.type,
-  ]);
+    }),
+    [
+      artist?.id,
+      artist?.name,
+      missingReleasePick?.title,
+      missingReleasePick?.type,
+      releaseGroup,
+    ],
+  );
+  const tracksQuery = useQuery({
+    queryKey: queryKeys.releaseGroupTracks(missingReleasePick?.releaseGroupId, trackContext),
+    queryFn: ({ signal }) =>
+      getReleaseGroupTracks(missingReleasePick.releaseGroupId, { ...trackContext, signal }),
+    enabled: Boolean(missingReleasePick?.releaseGroupId),
+    staleTime: 5 * 60 * 1000,
+  });
+  const tracks = useMemo(
+    () => (Array.isArray(tracksQuery.data) ? tracksQuery.data : []),
+    [tracksQuery.data],
+  );
+  const loadingTracks = tracksQuery.isPending;
 
   useEffect(() => {
     setShowAllTracks(false);
@@ -210,7 +202,6 @@ export function ArtistDetailsDownloadTargets({
             </div>
             <div className="artist-pick-panel__content">
               <div className="artist-min-0">
-                <div className="artist-eyebrow">Aurral Pick</div>
                 <h2 className="artist-pick-title">{missingReleasePick.title}</h2>
                 <div className="artist-meta-line">
                   {missingReleasePick.year && <span>{missingReleasePick.year}</span>}
@@ -241,12 +232,11 @@ export function ArtistDetailsDownloadTargets({
           <div className="artist-pick-panel__tracks artist-min-0">
             {loadingTracks ? (
               <div className="artist-loading">
-                <Loader className="artist-spinner animate-spin" />
+                <DotLoader size="xl" label={null} />
               </div>
             ) : tracks.length ? (
               <>
                 <div className="artist-pick-panel__tracks-header">
-                  <span className="artist-pick-panel__tracks-label">Preview tracks</span>
                   <ArtistTrackListToolbar
                     disabled={toolbarDisabled}
                     isPlaying={isListPlaying}
@@ -288,15 +278,27 @@ export function ArtistDetailsDownloadTargets({
                                 ? resolveMembershipTrack(track, missingReleasePick.releaseGroup)
                                 : track
                             }
+                            triggerVariant="kebab"
                             playlists={playlists}
                             loading={playlistsLoading}
                             saving={playlistSavingKey === currentTrackId}
+                            librarySaving={libraryTrackSavingKeys?.has(currentTrackId)}
                             error={playlistError}
                             defaultNewPlaylistName={getDefaultPlaylistName?.(
                               track,
                               missingReleasePick.releaseGroup,
                             )}
                             onLoadPlaylists={onLoadPlaylists}
+                            onAddToLibrary={
+                              onAddTrackToLibrary
+                                ? () =>
+                                    onAddTrackToLibrary(
+                                      track,
+                                      missingReleasePick.releaseGroup,
+                                      currentTrackId,
+                                    )
+                                : null
+                            }
                             onSelect={(target) =>
                               onAddTrackToPlaylist(track, missingReleasePick.releaseGroup, target)
                             }

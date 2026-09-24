@@ -37,6 +37,9 @@ export const normalizeSettings = (savedSettings) => {
   return {
     ...savedSettings,
     dateTimeFormat: normalizeDateTimeFormat(savedSettings.dateTimeFormat),
+    subsonic: {
+      favoriteAutoKeep: savedSettings.subsonic?.favoriteAutoKeep !== false,
+    },
     downloadFolderPath: String(savedSettings.downloadFolderPath || "").trim(),
     pathMappings: Array.isArray(savedSettings.pathMappings) ? savedSettings.pathMappings : [],
     playlistArtwork: {
@@ -66,6 +69,7 @@ export const normalizeSettings = (savedSettings) => {
         externalUrl: "",
         apiKey: "",
         searchOnAdd: false,
+        availableOnly: true,
         defaultMonitorOption: "none",
         ...lidarr,
         qualityProfileId:
@@ -78,12 +82,8 @@ export const normalizeSettings = (savedSettings) => {
         url: "",
         username: "",
         password: "",
+        prefixOwnerUsername: true,
         ...(savedSettings.integrations?.navidrome || {}),
-        m3uPathMode:
-          savedSettings.integrations?.navidrome?.m3uPathMode === "remote" ? "remote" : "local",
-        pathMappings: Array.isArray(savedSettings.integrations?.navidrome?.pathMappings)
-          ? savedSettings.integrations.navidrome.pathMappings
-          : [],
       },
       plex: {
         url: "",
@@ -93,9 +93,14 @@ export const normalizeSettings = (savedSettings) => {
         downloadsPath: "",
         ...(savedSettings.integrations?.plex || {}),
       },
+      jellyfin: {
+        url: "",
+        apiKey: "",
+        userId: "",
+        ...(savedSettings.integrations?.jellyfin || {}),
+      },
       lastfm: {
         apiKey: "",
-        username: "",
         discoveryPeriod: "1month",
         discoveryAutoRefreshHours: normalizedAutoRefreshHours,
         discoveryRecommendationsPerRefresh: normalizedRecommendationsPerRefresh,
@@ -170,6 +175,13 @@ export const normalizeSettings = (savedSettings) => {
         priority: 50,
         stagingPath: "",
         ...(savedSettings.integrations?.ytdlp || {}),
+      },
+      deemix: {
+        enabled: false,
+        url: "",
+        bitrate: 9,
+        priority: 15,
+        ...(savedSettings.integrations?.deemix || {}),
       },
       ticketmaster: {
         apiKey: "",

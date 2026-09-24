@@ -7,6 +7,8 @@ import {
   withJobHeartbeat,
 } from "./honkerWorkerRuntime.js";
 import { getWorkerId } from "./honkerDb.js";
+import { shouldStartQueueHere } from "./backgroundWorkerQueues.js";
+import { logger } from "./logger.js";
 
 export default function createHonkerWorker({
   name,
@@ -23,6 +25,7 @@ export default function createHonkerWorker({
   onJobError,
   onFinalFailure,
   onLoopError,
+  shouldLogFailure = () => true,
 }) {
   let running = false;
   let stopRequested = false;
@@ -31,6 +34,16 @@ export default function createHonkerWorker({
 
   async function handleJobFailure(error, job, queue) {
     const message = error?.message || String(error);
+    const logFailure = (action) => {
+      if (!shouldLogFailure(job)) return;
+      logger[action === "fail" ? "error" : "warn"]("jobs", `Job ${action === "fail" ? "failed" : "attempt failed; retrying"}`, {
+        queue: name,
+        jobId: job.id,
+        kind: typeof job.payload?.kind === "string" ? job.payload.kind : null,
+        attempt: job.attempts,
+        reason: message,
+      });
+    };
     let attemptLimit = Number(queue.maxAttempts) || 3;
     try {
       const storedJob = queue.getJob(job.id);
@@ -38,13 +51,20 @@ export default function createHonkerWorker({
       if (Number.isFinite(storedLimit) && storedLimit > 0) {
         attemptLimit = storedLimit;
       }
-    } catch {}
+    } catch (lookupError) {
+      logger.warn("jobs", "Could not read job retry limit", {
+        queue: name,
+        jobId: job.id,
+        reason: lookupError?.message || String(lookupError),
+      });
+    }
     if (typeof onJobError === "function") {
       onJobError(error, job);
     }
     if (typeof resolveRetry === "function") {
       const decision = resolveRetry(error, job);
       if (decision?.action === "fail") {
+        logFailure("fail");
         job.fail(decision.message ?? message);
         if (typeof onFinalFailure === "function") {
           await onFinalFailure(job, error);
@@ -52,16 +72,19 @@ export default function createHonkerWorker({
         return;
       }
       if (decision?.action === "retry") {
+        logFailure("retry");
         job.retry(decision.delayS ?? retryDelayS, decision.message ?? message);
         return;
       }
     }
     if (job.attempts >= attemptLimit) {
+      logFailure("fail");
       job.fail(message);
       if (typeof onFinalFailure === "function") {
         await onFinalFailure(job, error);
       }
     } else {
+      logFailure("retry");
       job.retry(retryDelayS, message);
     }
   }
@@ -80,6 +103,19 @@ export default function createHonkerWorker({
       })) {
         idleController.disarm();
         if (!running || stopRequested) break;
+        if (process.env.AURRAL_BACKGROUND_WORKER_GROUP) {
+          const [{ dbOps }, { invalidateFlowPlaylistConfigCache }] = await Promise.all([
+            import("../db/helpers/index.js"),
+            import("./weeklyFlow/weeklyFlowPlaylistConfig.js"),
+          ]);
+          dbOps.invalidateSettingsCache();
+          invalidateFlowPlaylistConfigCache();
+          if (process.env.AURRAL_BACKGROUND_WORKER_GROUP.startsWith("discovery-") ||
+              process.env.AURRAL_BACKGROUND_WORKER_GROUP === "inbox") {
+            const { reloadDiscoveryPersistedCache } = await import("./discovery/persistence.js");
+            reloadDiscoveryPersistedCache();
+          }
+        }
         if (typeof filterJob === "function" && filterJob(job) === false) {
           job.ack();
           idleController.arm();
@@ -87,6 +123,9 @@ export default function createHonkerWorker({
         }
         if (typeof onJobDequeue === "function") {
           onJobDequeue(job.payload, job);
+        }
+        if (process.env.AURRAL_BACKGROUND_WORKER_GROUP && process.connected && process.send) {
+          process.send({ type: "job-started", queue: name, jobId: job.id });
         }
         try {
           await withJobHeartbeat(job, queue, () => processJob(job.payload, job));
@@ -96,6 +135,10 @@ export default function createHonkerWorker({
           }
         } catch (error) {
           await handleJobFailure(error, job, queue);
+        } finally {
+          if (process.env.AURRAL_BACKGROUND_WORKER_GROUP && process.connected && process.send) {
+            process.send({ type: "job-finished", queue: name, jobId: job.id });
+          }
         }
         idleController.arm();
       }
@@ -122,7 +165,7 @@ export default function createHonkerWorker({
   }
 
   function start() {
-    if (running || isHonkerShuttingDown()) return;
+    if (running || isHonkerShuttingDown() || !shouldStartQueueHere(name)) return;
     if (typeof onStart === "function" && onStart() === false) return;
     running = true;
     stopRequested = false;

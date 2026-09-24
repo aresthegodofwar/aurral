@@ -11,6 +11,9 @@ const repoRoot = join(__dirname, "..", "..");
 const RESET_TABLES = [
   "sessions",
   "user_identities",
+  "lastfm_link_states",
+  "subsonic_stars",
+  "play_events",
   "honker_task_runs",
   "slskd_transfer_history",
   "playlist_download_jobs",
@@ -22,14 +25,24 @@ const RESET_TABLES = [
   "musicbrainz_artist_mbid_cache",
   "artist_overrides",
   "lidarr_artist_id_map",
+  "library_media_files",
+  "library_album_tracks",
+  "library_tracks",
+  "library_albums",
+  "library_artists",
+  "library_scan_runs",
+  "library_search_documents",
   "settings",
 ];
 
-export async function createIsolatedStateDir(name = "test") {
+export async function createIsolatedStateDir(
+  name = "test",
+  { dataDirRelativePath = "data" } = {},
+) {
   const baseDir = await mkdtemp(
     join(tmpdir(), `aurral-${String(name || "test")}-`),
   );
-  const dataDir = join(baseDir, "data");
+  const dataDir = join(baseDir, dataDirRelativePath);
   const dbPath = join(dataDir, "aurral.test.db");
   await mkdir(dataDir, { recursive: true });
   return {
@@ -59,6 +72,10 @@ export async function cleanupIsolatedState(paths) {
   try {
     const honkerDb = await importFromRepo("backend/services/honkerDb.js");
     honkerDb.closeHonkerDb();
+  } catch {}
+  try {
+    const { db } = await importFromRepo("backend/config/db-sqlite.js");
+    if (db.open) db.close();
   } catch {}
   await rm(paths.baseDir, { recursive: true, force: true });
 }
@@ -142,10 +159,11 @@ export async function startServerProcess({
   port,
   extraEnv = {},
 } = {}) {
+  // Keep automatic ports above Fetch's highest blocked port (10080).
   const chosenPort =
     Number.isInteger(port) && port > 0
       ? port
-      : 4100 + Math.floor(Math.random() * 1000);
+      : 11000 + Math.floor(Math.random() * 1000);
   const child = spawn("node", ["backend/server.js"], {
     cwd: repoRoot,
     env: {

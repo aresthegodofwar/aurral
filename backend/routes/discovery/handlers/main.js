@@ -4,13 +4,14 @@ import {
   getDiscoveryMode,
   serveCachedRecommendations,
 } from "../../../services/discovery/index.js";
-import { libraryManager } from "../../../services/libraryManager.js";
 import { requireAuth } from "../../../middleware/requirePermission.js";
+import { getCanonicalArtistKeyProjection } from "../../../services/libraryQueryService.js";
 import {
   buildArtistKeySet,
   isLibraryArtist,
 } from "./utils.js";
 import { getUserDiscovery } from "../../../services/discovery/userDiscovery.js";
+import { enrichEditorialTracksWithDeezerPreviews } from "../../../services/discovery/editorialPlaylistBuilder.js";
 
 export function registerMain(router) {
   router.get("/", requireAuth, async (req, res) => {
@@ -45,6 +46,19 @@ export function registerMain(router) {
     });
   });
 
+  router.get("/playlists/:presetId/previews", requireAuth, async (req, res) => {
+    const { body } = await getUserDiscovery(req.user.id, 0, 0);
+    const playlist = body.discoverPlaylists.find(
+      (candidate) => candidate.presetId === req.params.presetId && candidate.type === "editorial",
+    );
+    if (!playlist) {
+      return res.status(404).json({ error: "Editorial playlist not found" });
+    }
+    const tracks = await enrichEditorialTracksWithDeezerPreviews(playlist.tracks);
+    res.set("Cache-Control", "no-store");
+    return res.json({ tracks });
+  });
+
   router.get("/similar", requireAuth, (req, res) => {
     const discoveryCache = getDiscoveryCache();
     res.json({
@@ -63,8 +77,7 @@ export function registerMain(router) {
       let recommendations = discoveryCache.recommendations || [];
       let globalTop = discoveryCache.globalTop || [];
 
-      const libraryArtists = await libraryManager.getAllArtists();
-      const existingArtistKeys = buildArtistKeySet(libraryArtists);
+      const existingArtistKeys = buildArtistKeySet(getCanonicalArtistKeyProjection());
 
       recommendations = recommendations.filter(
         (artist) => !isLibraryArtist(artist, existingArtistKeys),

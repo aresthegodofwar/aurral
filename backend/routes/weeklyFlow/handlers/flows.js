@@ -76,11 +76,19 @@ export function registerFlows(router) {
 
   router.post("/flows", async (req, res) => {
     try {
+      const ownerUserId = Number(req.user?.id);
+      if (!Number.isSafeInteger(ownerUserId) || ownerUserId <= 0) {
+        return res.status(400).json({
+          error: "Flow ownership requires a real user",
+          message: "Authenticate as a user account before creating a flow.",
+        });
+      }
       const {
         name,
         mix,
         size,
         deepDive,
+        recordHistory,
         yearFrom,
         yearTo,
         tags,
@@ -97,13 +105,14 @@ export function registerFlows(router) {
         mix,
         size,
         deepDive,
+        recordHistory,
         yearFrom,
         yearTo,
         tags,
         relatedArtists,
         scheduleDays,
         scheduleTime,
-        ownerUserId: req.user.id,
+        ownerUserId,
       });
       await playlistManager.ensureSmartPlaylists();
       res.json({ success: true, flow });
@@ -133,6 +142,7 @@ export function registerFlows(router) {
         mix,
         size,
         deepDive,
+        recordHistory,
         tags,
         relatedArtists,
         scheduleDays,
@@ -150,6 +160,7 @@ export function registerFlows(router) {
         mix,
         size,
         deepDive,
+        recordHistory,
         tags,
         relatedArtists,
         scheduleDays,
@@ -308,6 +319,7 @@ export function registerFlows(router) {
         name: requestedName || `${flow.name} Static`,
         sourceName: flow.name,
         sourceFlowId: flowId,
+        recordHistory: flow.recordHistory !== false,
         tracks,
         ownerUserId: flow.ownerUserId ?? req.user.id,
       });

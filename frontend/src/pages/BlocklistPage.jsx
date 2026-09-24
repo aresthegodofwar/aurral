@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
-import { Ban, Loader2, Search, X } from "lucide-react";
+import { Ban, Search, X } from "lucide-react";
+import { DotLoader } from "../components/DotLoader";
 import { useArtistTasteFeedback } from "../hooks/useArtistTasteFeedback";
 import { useDocumentTitle } from "../hooks/useDocumentTitle";
 import { searchUnified } from "../utils/api/endpoints/search.js";
 import { buildBlocklistArtistSuggestions } from "../utils/blocklistSearch.js";
+import TooltipButton from "../components/TooltipButton";
 
 const normalizeArtist = (artist) => ({
   id: artist?.id || artist?.mbid || artist?.foreignArtistId || null,
@@ -95,19 +97,28 @@ export default function BlocklistPage() {
 
       <section className="blocklist-page__panel">
         <div className="blocklist-page__panel-title">
-          <Ban className="artist-icon-sm" aria-hidden="true" />
           <h2>Block an artist</h2>
         </div>
-        <form className="blocklist-page__search" onSubmit={submitTypedArtist}>
-          <Search className="artist-icon-sm" aria-hidden="true" />
-          <input
-            type="search"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search for an artist"
-            aria-label="Search for an artist to block"
-          />
-          {searching ? <Loader2 className="artist-icon-sm animate-spin" aria-hidden="true" /> : null}
+        <form
+          className="blocklist-page__search-form"
+          onSubmit={submitTypedArtist}
+          aria-busy={searching}
+        >
+          <label className="blocklist-page__search-label" htmlFor="blocklist-search">
+            Artist name
+          </label>
+          <div className="blocklist-page__search">
+            <Search className="artist-icon-sm" aria-hidden="true" />
+            <input
+              id="blocklist-search"
+              type="search"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Search artists or enter a name"
+              aria-label="Search for an artist to block"
+            />
+            {searching ? <DotLoader size="sm" label="Searching" /> : null}
+          </div>
         </form>
         {suggestions.length > 0 ? (
           <div className="blocklist-page__suggestions">
@@ -120,10 +131,11 @@ export default function BlocklistPage() {
                   onClick={() => blockArtist(artist)}
                   disabled={pendingKey === key}
                   className="blocklist-page__suggestion"
+                  aria-label={`Block ${artist.name}`}
                 >
                   <span>{artist.name}</span>
                   {pendingKey === key ? (
-                    <Loader2 className="artist-icon-xs animate-spin" />
+                    <DotLoader size="xs" label={null} />
                   ) : (
                     <Ban className="artist-icon-xs" />
                   )}
@@ -145,7 +157,7 @@ export default function BlocklistPage() {
               return (
                 <div className="blocklist-page__item" key={key}>
                   <span>{entry.artistName || entry.artistId}</span>
-                  <button
+                  <TooltipButton
                     type="button"
                     onClick={() => unblockArtist(entry)}
                     disabled={pendingKey === key}
@@ -154,11 +166,11 @@ export default function BlocklistPage() {
                     title="Unblock artist"
                   >
                     {pendingKey === key ? (
-                      <Loader2 className="artist-icon-xs animate-spin" />
+                      <DotLoader size="xs" label={null} />
                     ) : (
                       <X className="artist-icon-xs" />
                     )}
-                  </button>
+                  </TooltipButton>
                 </div>
               );
             })}

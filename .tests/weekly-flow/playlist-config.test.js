@@ -7,14 +7,25 @@ import {
   resetDatabase,
 } from "../helpers/backendTestHarness.js";
 
-const [isolatedState, { db }, { dbOps }, playlistConfigModule] =
+const [
+  isolatedState,
+  { db },
+  { dbOps },
+  playlistConfigModule,
+  flowHandlerUtils,
+  flowHandlersModule,
+] =
   await setupIsolatedBackend(
     "playlist-config",
     "backend/config/db-sqlite.js",
     "backend/db/helpers/index.js",
     "backend/services/weeklyFlow/weeklyFlowPlaylistConfig.js",
+    "backend/routes/weeklyFlow/handlers/utils.js",
+    "backend/routes/weeklyFlow/handlers/flows.js",
   );
-const { flowPlaylistConfig, tracksShareMembership } = playlistConfigModule;
+const { flowPlaylistConfig, normalizeImportSource, tracksShareMembership } = playlistConfigModule;
+const { validateFlowPayload } = flowHandlerUtils;
+const { registerFlows } = flowHandlersModule;
 
 test.beforeEach(() => {
   resetDatabase(db);
@@ -54,6 +65,126 @@ test("creates flows with normalized scheduling and enforces unique names", () =>
       }),
     /already exists/,
   );
+});
+
+test("normalizes invalid playlist owners to null", () => {
+  const flow = flowPlaylistConfig.createFlow({ name: "Unowned Flow", ownerUserId: 0 });
+  const playlist = flowPlaylistConfig.createSharedPlaylist({
+    name: "Unowned Playlist",
+    ownerUserId: "0",
+  });
+  const fractional = flowPlaylistConfig.createFlow({
+    name: "Fractional Owner",
+    ownerUserId: 7.9,
+  });
+  const unsafe = flowPlaylistConfig.createFlow({
+    name: "Unsafe Owner",
+    ownerUserId: Number.MAX_SAFE_INTEGER + 1,
+  });
+  const unowned = flowPlaylistConfig.createFlow({ name: "Invalid Owner Conflict" });
+  const unownedPlaylist = flowPlaylistConfig.createSharedPlaylist({
+    name: "Invalid Playlist Owner Conflict",
+  });
+  const owned = flowPlaylistConfig.createFlow({ name: "Owned Flow", ownerUserId: 7 });
+
+  assert.equal(flow.ownerUserId, null);
+  assert.equal(playlist.ownerUserId, null);
+  assert.equal(fractional.ownerUserId, null);
+  assert.equal(unsafe.ownerUserId, null);
+  assert.equal(owned.ownerUserId, 7);
+  assert.throws(
+    () =>
+      flowPlaylistConfig.createFlow({
+        name: "Invalid Owner Conflict",
+        ownerUserId: "not-a-user",
+      }),
+    /already exists/,
+  );
+  assert.throws(
+    () =>
+      flowPlaylistConfig.createSharedPlaylist({
+        name: "Invalid Playlist Owner Conflict",
+        ownerUserId: "not-a-user",
+      }),
+    /already exists/,
+  );
+
+  flowPlaylistConfig.deleteFlow(flow.id);
+  flowPlaylistConfig.deleteSharedPlaylist(playlist.id);
+  flowPlaylistConfig.deleteFlow(fractional.id);
+  flowPlaylistConfig.deleteFlow(unsafe.id);
+  flowPlaylistConfig.deleteFlow(unowned.id);
+  flowPlaylistConfig.deleteSharedPlaylist(unownedPlaylist.id);
+  flowPlaylistConfig.deleteFlow(owned.id);
+});
+
+test("rejects flow creation without a real user owner", async () => {
+  const beforeFlowIds = flowPlaylistConfig.getFlows().map((flow) => flow.id);
+  let createHandler;
+  const router = {
+    post(path, ...handlers) {
+      if (path === "/flows") createHandler = handlers.at(-1);
+    },
+    put() {},
+    delete() {},
+    get() {},
+  };
+  registerFlows(router);
+
+  const response = {
+    statusCode: 200,
+    body: null,
+    status(code) {
+      this.statusCode = code;
+      return this;
+    },
+    json(body) {
+      this.body = body;
+      return this;
+    },
+  };
+
+  await createHandler({ body: {}, user: { id: -1, role: "admin" } }, response);
+
+  assert.equal(response.statusCode, 400);
+  assert.equal(response.body.error, "Flow ownership requires a real user");
+  assert.deepEqual(
+    flowPlaylistConfig.getFlows().map((flow) => flow.id),
+    beforeFlowIds,
+  );
+});
+
+test("defaults listening history on and persists a flow opt-out", () => {
+  const flow = flowPlaylistConfig.createFlow({
+    name: "No History",
+    size: 20,
+  });
+
+  assert.equal(flow.recordHistory, true);
+
+  const updated = flowPlaylistConfig.updateFlow(flow.id, {
+    recordHistory: false,
+  });
+
+  assert.equal(updated?.recordHistory, false);
+  assert.equal(flowPlaylistConfig.getFlow(flow.id)?.recordHistory, false);
+});
+
+test("rejects non-boolean listening history payloads", () => {
+  dbOps.updateSettings({ integrations: { lastfm: { apiKey: "test" } } });
+  const payload = {
+    name: "Validated History",
+    size: 20,
+    mix: { discover: 100 },
+    scheduleDays: [1],
+  };
+
+  assert.equal(
+    validateFlowPayload({ ...payload, recordHistory: "false" }),
+    "recordHistory must be a boolean",
+  );
+  assert.equal(validateFlowPayload({ ...payload, recordHistory: false }), null);
+  assert.equal(validateFlowPayload(payload), null);
 });
 
 test("stores and swaps optional release year range", () => {
@@ -231,6 +362,34 @@ test("updates shared playlists and keeps summaries in sync", () => {
   assert.equal(updated?.tracks?.length, 1);
   assert.equal(summary?.name, "Gym Mix Updated");
   assert.equal(summary?.trackCount, 1);
+});
+
+test("defaults Spotify removed-track retention on and preserves an explicit opt-out", () => {
+  const source = normalizeImportSource({
+    provider: "spotify-playlist",
+    externalId: "playlist-id",
+    syncEnabled: true,
+    syncIntervalHours: 24,
+  });
+  const optedOut = normalizeImportSource({
+    ...source,
+    keepRemovedTracks: false,
+  });
+
+  assert.equal(source.keepRemovedTracks, true);
+  assert.equal(optedOut.keepRemovedTracks, false);
+});
+
+test("rejects unsupported playlist import providers", () => {
+  assert.equal(
+    normalizeImportSource({
+      provider: "unknown-provider",
+      externalId: "playlist-id",
+      syncEnabled: true,
+      syncIntervalHours: 24,
+    }),
+    null,
+  );
 });
 
 test("preserves rich track metadata when shared playlists are updated", () => {

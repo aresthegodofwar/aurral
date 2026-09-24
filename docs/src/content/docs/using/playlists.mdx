@@ -3,7 +3,8 @@ title: Playlists overview
 description: Flows, static imports, and how they differ.
 ---
 
-The **Playlists** page contains flows and imported playlists. Both types use the Aurral folder under `aurral-weekly-flow`.
+Static playlists appear under **Library > Playlists**. Flows appear separately
+under **Flows** because their downloaded media is temporary.
 
 Aurral does not write these files to your main music library.
 
@@ -11,14 +12,19 @@ Aurral does not write these files to your main music library.
 
 ## Flows compared with static playlists
 
-|           | Flows                                  | Static playlists                 |
-| --------- | -------------------------------------- | -------------------------------- |
-| Tracklist | Regenerates on a schedule              | Fixed from import or export      |
-| Downloads | Can generate replacement picks         | Keeps the exact imported tracks  |
-| Controls  | Schedule, source mix, focus, deep dive | None of the flow controls        |
-| Worker    | Shared download worker                 | Shared download worker           |
+|           | Flows                                  | Static playlists                         |
+| --------- | -------------------------------------- | ----------------------------------------- |
+| Tracklist | Regenerates on a schedule              | Fixed from import or follows a provider   |
+| Downloads | Can generate replacement picks         | Keeps the exact imported tracks           |
+| Controls  | Schedule, source mix, focus, deep dive | Import, sync, and retention settings      |
+| Worker    | Shared download worker                 | Shared download worker                    |
 
-Flows refresh on a schedule and use your flow settings. Static playlists come from Spotify, JSON files, or exported flow tracklists.
+Flows refresh on a schedule and use your flow settings. Static playlists come from Spotify, Last.fm, ListenBrainz, JSON files, or exported flow tracklists. Synced imports follow provider membership; their removed-track file-retention setting is available in the import flow and playlist menu.
+
+Open any flow or static playlist's **More** menu to set **Record listening
+history**. Turn it off when playback from that playlist should not affect future
+Discover recommendations or connected scrobblers. The setting is independent
+for each playlist and does not remove plays already recorded.
 
 Flow names and static playlist names must be unique across both types. Aurral uses the same bare name for Navidrome and Plex playlists.
 
@@ -28,19 +34,18 @@ Select **Re-search missing** from the playlist menu to try the track again.
 
 ## Import and Lidarr sync
 
-Use **Import playlist** for Spotify (connect in-app) or a JSON tracklist. See [Playlist imports](/using/playlist-imports/).
+Use **Import playlist** for Spotify, Last.fm, ListenBrainz, or a JSON tracklist. Connect Spotify in the import flow. Connect ListenBrainz in **Settings > Playback**; configure a Last.fm username in **Profile**. See [Playlist imports](/using/playlist-imports/).
 
 Flows can expose a **Lidarr import URL** so Lidarr polls the current flow tracklist as a custom import list. See [Lidarr: Import list feeds](/integrations/lidarr/#import-list-feeds).
 
 ## Where files go
 
-Generated playlists go under your Downloads Folder path. Set this path in **Settings > Download Clients**. Usually, the path is:
+Static playlist membership is stored as canonical track references. Aurral-owned
+permanent tracks use the canonical `artist/album/track` layout under the
+configured Aurral download folder. Set this path in **Settings > Download clients**.
 
-```text
-/data/downloads/aurral/aurral-weekly-flow/<playlist-id>/
-```
-
-Navidrome can scan that tree and play `.m3u` playlists. Plex can index the track folders and create playlists for Plexamp.
+Flow media is temporary and lives under `_flows` below that root. Navidrome and
+Plex can use the roots they are configured to scan.
 
 See [Navidrome](/integrations/navidrome/) and [Plex](/integrations/plex/) for playback setup.
 
@@ -50,7 +55,7 @@ See [Filesystem and mounts](/getting-started/storage/) for storage setup.
 
 ## Quality profile
 
-Open **Settings > Download Clients > Quality Profile** to set the audio quality rules for flows and static playlists.
+Open **Settings > Download clients > Quality profile** to set the audio quality rules for flows and static playlists.
 
 The profile is global. Only an administrator can change it.
 
@@ -71,13 +76,13 @@ The default profile accepts all tiers and uses **FLAC standard** as the cutoff.
 
 Aurral can use search-result names and bitrate data to order candidates. Aurral does not trust that data for final admission. It reads the downloaded file and rejects it when the format, bitrate, sample rate, or bit depth does not match an enabled tier.
 
-An unknown final quality is not valid. A quality rejection does not go to **Activity > Review**. Review stays for track identity and duration decisions.
+An unknown final quality is not valid. A quality rejection does not go to **Activity > Queue**. Queue review stays for track identity and duration decisions, including upgrade downloads.
 
 The **Quality** column on the Playlists page shows the measured tier and its profile state. It labels a file reused from Lidarr as **Lidarr**.
 
 ## Track upgrades
 
-Aurral can upgrade files that it owns under the flow and static playlist folder. It does not change files from Lidarr or another external library.
+Aurral can upgrade files that it owns in the canonical Library or under `_flows`. It does not change files from Lidarr or another external library.
 
 Existing Aurral files stay available when they are below the new quality floor. Aurral replaces one only after it downloads and validates a better file. If more than one playlist uses the same file, Aurral updates all playlist references together.
 
@@ -90,13 +95,15 @@ If an upgrade search is already in the queue for a track, Aurral reports that st
 
 A user who can open the playlist can start these searches. Manual searches work when automatic upgrades are off.
 
-To schedule upgrades, enable **Automatic upgrades** in the Quality Profile. The default is off. Set the interval from 1 to 365 days. The default is 2 days for each track.
+To schedule upgrades, enable **Automatic upgrades** in the quality profile. The default is off. Set the interval from 1 to 365 days. The default is 2 days for each track.
 
 Upgrade jobs have a lower priority than missing-track downloads. Aurral uses slskd and Usenet for upgrades, in the configured source-priority order. It stops after the first source provides a valid, strictly better file. It waits for the next interval before it tries another automatic improvement for that track.
+
+If an upgrade download matches the requested track but has a significant duration mismatch, Aurral retains it under **Activity > Queue** for preview, approval, or denial. Approving it replaces the existing Aurral file.
 
 yt-dlp can supply an acceptable first file. Aurral does not use yt-dlp for upgrades.
 
 ## Next steps
 
 - [Flows](/using/flows/): schedule, source mix, focus, and generation behavior
-- [Playlist imports](/using/playlist-imports/): Spotify connect, JSON formats, retries, and file reuse
+- [Playlist imports](/using/playlist-imports/): Spotify, Last.fm, and ListenBrainz imports, JSON formats, retries, and file reuse

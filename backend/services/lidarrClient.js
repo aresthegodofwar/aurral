@@ -10,6 +10,7 @@ import { musicbrainzGetArtistIdentityByMbid } from "./apiClients/musicbrainz.js"
 const CIRCUIT_COOLDOWN_MS = 60000;
 const CIRCUIT_FAILURE_THRESHOLD = 3;
 const LIDARR_MAX_CONCURRENT = 12;
+export const LIDARR_TRACK_FILE_ID_BATCH_SIZE = 400;
 const LIDARR_ALBUM_LOOKUP_CONCURRENCY = 6;
 export const LIDARR_ALBUM_LOOKUP_BATCH_MAX = 100;
 const LIDARR_LIST_CACHE_MS = 30000;
@@ -30,9 +31,25 @@ const VALID_MONITOR_OPTIONS = new Set([
   "first",
 ]);
 
+export function normalizeLidarrUrl(value) {
+  return String(value || "").replace(/\/+$/, "");
+}
+
+export function normalizeLidarrApiKey(value) {
+  return String(value || "").trim();
+}
+
 function normalizeRootFolderPath(value) {
   const normalized = String(value || "").trim();
   return normalized || null;
+}
+
+function normalizeRootFolderPaths(values) {
+  return [...new Set(
+    (Array.isArray(values) ? values : [])
+      .map(normalizeRootFolderPath)
+      .filter(Boolean),
+  )];
 }
 
 function normalizeProfileId(value) {
@@ -49,6 +66,29 @@ function normalizeProfileId(value) {
 function normalizeLidarrArtistId(value) {
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed > 0 ? String(parsed) : null;
+}
+
+function normalizeLidarrArtistIds(values) {
+  return [
+    ...new Set(
+      (Array.isArray(values) ? values : [])
+        .map(normalizeLidarrArtistId)
+        .filter(Boolean),
+    ),
+  ];
+}
+
+function normalizeLidarrTrackFileIds(values) {
+  return [
+    ...new Set(
+      (Array.isArray(values) ? values : [])
+        .map((value) => {
+          const parsed = Number(value);
+          return Number.isSafeInteger(parsed) && parsed > 0 ? String(parsed) : null;
+        })
+        .filter(Boolean),
+    ),
+  ];
 }
 
 function isMetadataProviderIdError(error) {
@@ -138,7 +178,8 @@ function findQualityProfile(qualityProfiles, qualityProfileId) {
 }
 
 export class LidarrClient {
-  constructor() {
+  constructor({ persistRootFolderPaths = true } = {}) {
+    this._persistRootFolderPaths = persistRootFolderPaths;
     this.config = null;
     this.apiPath = "/api/v1";
     this._circuitOpen = false;
@@ -154,6 +195,7 @@ export class LidarrClient {
     this._albumCache = new BoundedMap(LIDARR_ARTIST_ALBUM_CACHE_MAX);
     this._albumMbidIndex = null;
     this._statusCache = new BoundedMap(LIDARR_STATUS_CACHE_MAX);
+    this._rootFoldersCache = null;
     this._inflightGets = new Map();
     this._httpAgent = new http.Agent({
       keepAlive: true,
@@ -288,6 +330,9 @@ export class LidarrClient {
     if (endpoint === "/artist" && this._artistListCache) {
       return this._artistListCache.data;
     }
+    if (endpoint === "/rootFolder" && this._rootFoldersCache) {
+      return this._rootFoldersCache.data;
+    }
     if (endpoint === "/album" || endpoint.startsWith("/album?")) {
       const cached = this._albumCache.get(endpoint);
       if (cached) return cached.data;
@@ -308,7 +353,7 @@ export class LidarrClient {
     const dbConfig = settings.integrations?.lidarr || {};
     let url = dbConfig.url || process.env.LIDARR_URL || "http://localhost:8686";
 
-    url = url.replace(/\/+$/, "");
+    url = normalizeLidarrUrl(url);
 
     const insecure =
       dbConfig.insecure === true ||
@@ -323,19 +368,25 @@ export class LidarrClient {
 
     const newConfig = {
       url: url,
-      apiKey: (dbConfig.apiKey || process.env.LIDARR_API_KEY || "").trim(),
+      apiKey: normalizeLidarrApiKey(dbConfig.apiKey || process.env.LIDARR_API_KEY || ""),
+      rootFolderPath: normalizeRootFolderPath(dbConfig.rootFolderPath),
+      rootFolderPaths: normalizeRootFolderPaths(dbConfig.rootFolderPaths),
       insecure: !!insecure,
       timeoutMs,
       circuitDisabled,
+      enabled: dbConfig.enabled !== false,
     };
 
     const didConfigChange =
       !previousConfig ||
       previousConfig.url !== newConfig.url ||
       previousConfig.apiKey !== newConfig.apiKey ||
+      previousConfig.rootFolderPath !== newConfig.rootFolderPath ||
+      JSON.stringify(previousConfig.rootFolderPaths) !== JSON.stringify(newConfig.rootFolderPaths) ||
       previousConfig.insecure !== newConfig.insecure ||
       previousConfig.timeoutMs !== newConfig.timeoutMs ||
-      previousConfig.circuitDisabled !== newConfig.circuitDisabled;
+      previousConfig.circuitDisabled !== newConfig.circuitDisabled ||
+      previousConfig.enabled !== newConfig.enabled;
 
     this.config = newConfig;
     if (didConfigChange) {
@@ -343,6 +394,7 @@ export class LidarrClient {
       this._invalidateArtistIndexes();
       this._albumCache = new BoundedMap(LIDARR_ARTIST_ALBUM_CACHE_MAX);
       this._statusCache.clear();
+      this._rootFoldersCache = null;
     }
   }
 
@@ -351,9 +403,17 @@ export class LidarrClient {
     return this.config;
   }
 
+  isEnabled() {
+    this.updateConfig();
+    return this.config?.enabled !== false;
+  }
+
   isConfigured(skipConfigUpdate = false) {
     if (!skipConfigUpdate) {
       this.updateConfig();
+    }
+    if (this.config?.enabled === false) {
+      return false;
     }
     return !!this.config?.apiKey?.trim();
   }
@@ -370,6 +430,7 @@ export class LidarrClient {
   async request(endpoint, method = "GET", data = null, skipConfigUpdate = false, options = {}) {
     const shouldDedupeGet =
       endpoint === "/artist" ||
+      endpoint === "/rootFolder" ||
       endpoint.startsWith("/album") ||
       endpoint === "/queue" ||
       endpoint.startsWith("/history?") ||
@@ -396,6 +457,9 @@ export class LidarrClient {
     }
 
     if (!this.isConfigured(skipConfigUpdate)) {
+      if (this.config?.enabled === false) {
+        throw new Error("Lidarr is disabled");
+      }
       throw new Error("Lidarr API key not configured");
     }
 
@@ -419,7 +483,7 @@ export class LidarrClient {
     const isStatusRequest =
       method === "GET" &&
       (endpoint === "/queue" || endpoint === "/command" || endpoint.startsWith("/history"));
-    if (isStatusRequest) {
+    if (isStatusRequest && !options.forceRefresh) {
       const cached = this._statusCache.get(endpoint);
       if (cached && now - cached.at < LIDARR_STATUS_CACHE_MS) {
         return cached.data;
@@ -566,8 +630,11 @@ export class LidarrClient {
           const statusText = error.response.statusText;
           const responseData = error.response.data;
 
-          const isAlbum404 = status === 404 && endpoint.includes("/album/");
-          if (!isAlbum404) {
+          const isMissingResource =
+            status === 404 &&
+            method === "GET" &&
+            /^\/(?:artist|album)\/\d+$/.test(endpoint);
+          if (!isMissingResource) {
             console.error(`Lidarr API error (${status}):`, {
               url: `${this.config.url}${this.apiPath}${endpoint}`,
               method: method,
@@ -606,38 +673,53 @@ export class LidarrClient {
               responseTextLower.includes("connect") ||
               responseTextLower.includes("econnrefused"));
           if (isLidarrSkyhookRefused) {
-            throw new Error(
+            const userError = new Error(
               "Lidarr cannot reach api.lidarr.audio from its container. Check Lidarr outbound internet/DNS or proxy settings.",
             );
+            userError.response = raw.response;
+            throw userError;
           }
           if (status === 400) {
-            throw new Error(
+            const userError = new Error(
               `Lidarr API returned 400 Bad Request: ${errorMsg}${
                 errorDetails ? `\n\nFull Response: ${errorDetails}` : ""
               }`,
             );
+            userError.response = raw.response;
+            throw userError;
           }
           if (status === 401) {
-            throw new Error(`Lidarr API authentication failed. Check your API key.`);
+            const userError = new Error(`Lidarr API authentication failed. Check your API key.`);
+            userError.response = raw.response;
+            throw userError;
           }
           if (status === 404) {
-            const isAlbumEndpoint = endpoint.includes("/album/");
-            if (isAlbumEndpoint) {
+            if (isMissingResource) {
               return null;
             }
-            throw new Error(
+            const userError = new Error(
               `Lidarr endpoint not found: ${endpoint}. Check if Lidarr is running and the API version is correct.`,
             );
+            userError.response = raw.response;
+            throw userError;
           }
-          throw new Error(
+          const userError = new Error(
             `Lidarr API error: ${status} - ${
               responseData?.message || responseData?.error || statusText || "Unknown error"
             }`,
           );
+          userError.response = raw.response;
+          throw userError;
         } else if (error.request) {
-          console.error("Lidarr API request failed - no response:", msg);
+          logger.error("library", "Lidarr API request failed with no response", {
+            endpoint: endpoint.split("?")[0],
+            method,
+            message: msg,
+            code: error.code || null,
+            timeoutMs: this.config.timeoutMs,
+          });
           throw new Error(
-            `Cannot connect to Lidarr at ${this.config.url}. Check if Lidarr is running and the URL is correct.`,
+            `Lidarr request failed with no response: ${method} ${endpoint.split("?")[0]}: ${msg}`,
           );
         } else {
           console.error("Lidarr API error:", msg);
@@ -656,82 +738,69 @@ export class LidarrClient {
       return { connected: false, error: "Lidarr not configured" };
     }
 
-    const apiPaths = ["/api/v1", "/api"];
+    this.apiPath = "/api/v1";
 
-    for (const apiPath of apiPaths) {
-      this.apiPath = apiPath;
+    try {
+      const status = await this.request("/system/status", "GET", null, skipConfigUpdate, {
+        bypassCircuit: true,
+      });
+      return {
+        connected: true,
+        version: status.version || "unknown",
+        instanceName: status.instanceName || "Lidarr",
+        apiPath: this.apiPath,
+      };
+    } catch (error) {
+      const errorMessage = error.message || "Unknown error";
+      const errorDetails = error.response?.data
+        ? typeof error.response.data === "string"
+          ? error.response.data
+          : JSON.stringify(error.response.data, null, 2)
+        : "";
 
-      try {
-        try {
-          const rootFolders = await this.request("/rootFolder", "GET", null, skipConfigUpdate, {
-            bypassCircuit: true,
-          });
-          return {
-            connected: true,
-            version: "connected",
-            instanceName: "Lidarr",
-            rootFoldersCount: Array.isArray(rootFolders) ? rootFolders.length : 0,
-            apiPath: apiPath,
-          };
-        } catch (rootFolderError) {
-          if (rootFolderError.message.includes("404") || rootFolderError.message.includes("400")) {
-            try {
-              const status = await this.request("/system/status", "GET", null, skipConfigUpdate, {
-                bypassCircuit: true,
-              });
-              return {
-                connected: true,
-                version: status.version || "unknown",
-                instanceName: status.instanceName || "Lidarr",
-                apiPath: apiPath,
-              };
-            } catch (statusError) {
-              if (apiPath === "/api/v1" && apiPaths.length > 1) {
-                continue;
-              }
-              throw rootFolderError;
-            }
-          }
-          if (apiPath === "/api/v1" && apiPaths.length > 1) {
-            continue;
-          }
-          throw rootFolderError;
-        }
-      } catch (error) {
-        if (apiPath === apiPaths[apiPaths.length - 1]) {
-          const errorMessage = error.message || "Unknown error";
-          const errorDetails = error.response?.data
-            ? typeof error.response.data === "string"
-              ? error.response.data
-              : JSON.stringify(error.response.data, null, 2)
-            : "";
-
-          const fullUrl = `${this.config.url}${apiPath}/rootFolder`;
-
-          return {
-            connected: false,
-            error: errorMessage,
-            details: errorDetails,
-            url: this.config.url,
-            fullUrl: fullUrl,
-            statusCode: error.response?.status,
-            apiPath: apiPath,
-            responseHeaders: error.response?.headers,
-          };
-        }
-        continue;
-      }
+      return {
+        connected: false,
+        error: errorMessage,
+        details: errorDetails,
+        url: this.config.url,
+        fullUrl: `${this.config.url}${this.apiPath}/system/status`,
+        statusCode: error.response?.status,
+        apiPath: this.apiPath,
+        responseHeaders: error.response?.headers,
+      };
     }
-
-    return {
-      connected: false,
-      error: "Failed to connect with any API path",
-      url: this.config.url,
-    };
   }
 
-  async getRootFolders() {
-    return this.request("/rootFolder");
+  getConfiguredRootFolderPaths() {
+    this.updateConfig();
+    return normalizeRootFolderPaths([
+      ...(Array.isArray(this.config.rootFolderPaths) ? this.config.rootFolderPaths : []),
+      this.config.rootFolderPath,
+    ]);
+  }
+
+  async getRootFolders({ forceRefresh = false } = {}) {
+    this.updateConfig();
+    if (!forceRefresh && this._rootFoldersCache) return this._rootFoldersCache.data;
+    const configured = this.getConfiguredRootFolderPaths();
+    if (!forceRefresh && configured.length > 0) {
+      const folders = configured.map((path) => ({ path }));
+      this._rootFoldersCache = { data: folders, at: Date.now() };
+      return folders;
+    }
+    const folders = mapRootFolders(await this.request(
+      "/rootFolder",
+      "GET",
+      null,
+      false,
+      { forceRefresh },
+    ));
+    this._rootFoldersCache = { data: folders, at: Date.now() };
+    const paths = folders.map((folder) => folder.path);
+    this.config.rootFolderPaths = this._persistRootFolderPaths
+      ? dbOps.setLidarrRootFolderPaths(paths)
+      : paths;
+    return folders;
   }
 
   async getTags(skipConfigUpdate = false) {
@@ -919,10 +988,16 @@ export class LidarrClient {
     const requestedMonitorOption = normalizeMonitorOption(
       options.monitorOption || options.monitor || "none",
     );
-    const monitoring = getArtistMonitoringPayload(requestedMonitorOption);
     const searchOnAdd = settings.integrations?.lidarr?.searchOnAdd ?? false;
     const albumMbid = String(options.albumMbid || "").trim();
     const albumsToMonitor = albumOnly && albumMbid ? [albumMbid] : [];
+    // Lidarr disables the artist for "none", even with explicit albumsToMonitor.
+    // The explicit album list takes precedence over "missing", so other albums stay unmonitored.
+    const monitoring = getArtistMonitoringPayload(
+      albumsToMonitor.length > 0 && requestedMonitorOption === "none"
+        ? "missing"
+        : requestedMonitorOption,
+    );
 
     const qualityProfileId = resolved.qualityProfileId;
     const defaultMetadataProfileId = settings.integrations?.lidarr?.metadataProfileId;
@@ -1021,12 +1096,14 @@ export class LidarrClient {
     };
 
     const resolveAddedArtist = async (artist) => {
-      if (normalizeLidarrArtistId(artist?.id)) {
+      const foreignArtistId = String(artist?.foreignArtistId || "").trim();
+      if (normalizeLidarrArtistId(artist?.id) && foreignArtistId === mbid) {
         return artist;
       }
-      let resolvedArtist = await this.getArtistByMbid(mbid);
+      const lookupId = foreignArtistId || mbid;
+      let resolvedArtist = await this.getArtistByMbid(lookupId);
       if (!normalizeLidarrArtistId(resolvedArtist?.id)) {
-        resolvedArtist = await this.getArtistByMbid(mbid, { forceRefresh: true });
+        resolvedArtist = await this.getArtistByMbid(lookupId, { forceRefresh: true });
       }
       if (!normalizeLidarrArtistId(resolvedArtist?.id)) {
         throw new Error(`Lidarr add did not return a numeric artist ID for ${mbid}`);
@@ -1190,6 +1267,9 @@ export class LidarrClient {
       throw new Error(`Lidarr artist ID must be numeric: ${artistId}`);
     }
     const artist = await this.getArtist(normalizedArtistId);
+    if (!artist) {
+      throw new Error(`Artist with ID ${normalizedArtistId} not found in Lidarr`);
+    }
 
     const updated = {
       ...artist,
@@ -1205,6 +1285,9 @@ export class LidarrClient {
       throw new Error(`Lidarr artist ID must be numeric: ${artistId}`);
     }
     const artist = await this.getArtist(normalizedArtistId);
+    if (!artist) {
+      throw new Error(`Artist with ID ${normalizedArtistId} not found in Lidarr`);
+    }
     const monitoring = getArtistMonitoringPayload(monitorOption);
 
     const updated = {
@@ -1299,30 +1382,134 @@ export class LidarrClient {
     }
   }
 
-  async getAllTracks() {
+  async getAllTracks(options = {}) {
+    const { artistIds, throwOnError = false, ...requestOptions } = options;
     try {
-      const result = await this.request("/track");
-      if (Array.isArray(result)) return result;
-      if (result?.records && Array.isArray(result.records)) return result.records;
-      return [];
-    } catch {
+      const normalizedArtistIds = normalizeLidarrArtistIds(artistIds);
+      if (normalizedArtistIds.length === 0) {
+        throw new Error("Lidarr artist IDs are required for bulk track reads");
+      }
+      const results = await mapWithConcurrency(
+        normalizedArtistIds,
+        LIDARR_MAX_CONCURRENT,
+        async (artistId) => {
+          const result = await this.request(
+            `/track?artistId=${artistId}`,
+            "GET",
+            null,
+            false,
+            requestOptions,
+          );
+          if (Array.isArray(result)) return result;
+          if (result?.records && Array.isArray(result.records)) return result.records;
+          return [];
+        },
+        { stopOnError: true },
+      );
+      return results.flat();
+    } catch (error) {
+      if (throwOnError) throw error;
       return [];
     }
   }
 
-  async getAllTrackFiles() {
+  async getAllTrackFiles(options = {}) {
+    const { artistIds, throwOnError = false, ...requestOptions } = options;
     try {
-      const result = await this.request("/trackfile");
-      if (Array.isArray(result)) return result;
-      if (result?.records && Array.isArray(result.records)) return result.records;
+      const normalizedArtistIds = normalizeLidarrArtistIds(artistIds);
+      if (normalizedArtistIds.length === 0) {
+        throw new Error("Lidarr artist IDs are required for bulk track-file reads");
+      }
+      const results = await mapWithConcurrency(
+        normalizedArtistIds,
+        LIDARR_MAX_CONCURRENT,
+        async (artistId) => {
+          const result = await this.request(
+            `/trackfile?artistId=${artistId}`,
+            "GET",
+            null,
+            false,
+            requestOptions,
+          );
+          if (Array.isArray(result)) return result;
+          if (result?.records && Array.isArray(result.records)) return result.records;
+          return [];
+        },
+        { stopOnError: true },
+      );
+      return results.flat();
+    } catch (error) {
+      if (throwOnError) throw error;
       return [];
-    } catch {
+    }
+  }
+
+  async getTrackFilesByIds(trackFileIds, options = {}) {
+    const { throwOnError = false, ...requestOptions } = options;
+    try {
+      const normalizedTrackFileIds = normalizeLidarrTrackFileIds(trackFileIds);
+      if (normalizedTrackFileIds.length === 0) return [];
+      const batches = [];
+      for (
+        let index = 0;
+        index < normalizedTrackFileIds.length;
+        index += LIDARR_TRACK_FILE_ID_BATCH_SIZE
+      ) {
+        batches.push(
+          normalizedTrackFileIds.slice(index, index + LIDARR_TRACK_FILE_ID_BATCH_SIZE),
+        );
+      }
+      const results = await mapWithConcurrency(
+        batches,
+        LIDARR_MAX_CONCURRENT,
+        async (batch) => {
+          const query = batch
+            .map((trackFileId) => `trackFileIds=${encodeURIComponent(trackFileId)}`)
+            .join("&");
+          const result = await this.request(
+            `/trackfile?${query}`,
+            "GET",
+            null,
+            false,
+            requestOptions,
+          );
+          if (Array.isArray(result)) return result;
+          if (result?.records && Array.isArray(result.records)) return result.records;
+          return [];
+        },
+      );
+      return results.flat();
+    } catch (error) {
+      if (throwOnError) throw error;
       return [];
     }
   }
 
   async getAllAlbums(options = {}) {
-    const albums = await this.request("/album", "GET", null, false, options);
+    const { artistIds, ...requestOptions } = options;
+    if (Array.isArray(artistIds)) {
+      const normalizedArtistIds = normalizeLidarrArtistIds(artistIds);
+      if (normalizedArtistIds.length === 0) return [];
+      const results = await mapWithConcurrency(
+        normalizedArtistIds,
+        LIDARR_MAX_CONCURRENT,
+        async (artistId) => {
+          const albums = await this.request(
+            `/album?artistId=${artistId}`,
+            "GET",
+            null,
+            false,
+            requestOptions,
+          );
+          if (Array.isArray(albums)) return albums;
+          if (albums?.records && Array.isArray(albums.records)) return albums.records;
+          return [];
+        },
+        { stopOnError: true },
+      );
+      return results.flat();
+    }
+    const albums = await this.request("/album", "GET", null, false, requestOptions);
     return Array.isArray(albums) ? albums : [];
   }
 
@@ -1377,6 +1564,9 @@ export class LidarrClient {
 
   async updateAlbum(albumId, updates) {
     const album = await this.getAlbum(albumId);
+    if (!album) {
+      throw new Error(`Album with ID ${albumId} not found in Lidarr`);
+    }
 
     const updated = {
       ...album,
@@ -1410,8 +1600,8 @@ export class LidarrClient {
     });
   }
 
-  async getQueue() {
-    const response = await this.request("/queue");
+  async getQueue(options = {}) {
+    const response = await this.request("/queue", "GET", null, false, options);
     if (response && Array.isArray(response)) {
       return response;
     }
@@ -1422,14 +1612,20 @@ export class LidarrClient {
     return this.request(`/queue/${queueId}`);
   }
 
-  async getHistory(page = 1, pageSize = 20, sortKey = "date", sortDirection = "descending") {
+  async getHistory(
+    page = 1,
+    pageSize = 20,
+    sortKey = "date",
+    sortDirection = "descending",
+    options = {},
+  ) {
     const params = new URLSearchParams({
       page: page.toString(),
       pageSize: pageSize.toString(),
       sortKey,
       sortDirection,
     });
-    return this.request(`/history?${params.toString()}`);
+    return this.request(`/history?${params.toString()}`, "GET", null, false, options);
   }
 
   async getHistoryForAlbum(albumId) {
@@ -1462,6 +1658,12 @@ export class LidarrClient {
     }
     const query = params.toString() ? `?${params.toString()}` : "";
     return this.request(`/album/${albumId}${query}`, "DELETE");
+  }
+
+  async deleteTrackFile(trackFileId) {
+    const result = await this.request(`/trackfile/${trackFileId}`, "DELETE");
+    this._albumCache.clear();
+    return result;
   }
 
   async getQualityProfiles(skipConfigUpdate = false) {

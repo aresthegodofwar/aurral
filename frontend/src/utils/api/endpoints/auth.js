@@ -1,28 +1,26 @@
-import { getData, postData, patchData, deleteData, fetchInflightOnce, bootstrapInflight, lidarrCredentialParams } from "../core.js";
+import { getData, postData, putData, patchData, deleteData } from "../core.js";
+import { queryClient, queryKeys } from "../../../queryClient.js";
 
-export const checkHealth = () => getData("/health");
+export const checkHealth = ({ force = false } = {}) =>
+  queryClient.fetchQuery({
+    queryKey: queryKeys.appHealth,
+    queryFn: ({ signal: querySignal }) => getData("/health", { signal: querySignal }),
+    staleTime: force ? 0 : 5_000,
+  });
 
 export const checkHealthLive = () => getData("/health/live", { timeout: 5000 });
 
-const BOOTSTRAP_CACHE_TTL_MS = 25_000;
-let bootstrapCache = null;
-
 export const invalidateBootstrapCache = () => {
-  bootstrapCache = null;
+  queryClient.removeQueries({ queryKey: queryKeys.authBootstrap });
 };
 
-export const getBootstrapStatus = () => {
-  if (bootstrapCache && Date.now() - bootstrapCache.at < BOOTSTRAP_CACHE_TTL_MS) {
-    return Promise.resolve(bootstrapCache.value);
-  }
-  return fetchInflightOnce(bootstrapInflight, "bootstrap", () => {
-    const at = Date.now();
-    return getData("/health/bootstrap").then((value) => {
-      bootstrapCache = { at, value };
-      return value;
-    });
+export const getBootstrapStatus = () =>
+  queryClient.fetchQuery({
+    queryKey: queryKeys.authBootstrap,
+    queryFn: ({ signal: querySignal }) =>
+      getData("/health/bootstrap", { signal: querySignal }),
+    staleTime: 25_000,
   });
-};
 
 export const browseFilesystem = (pathValue) =>
   getData("/filesystem/browse", {
@@ -69,19 +67,13 @@ export const completeOnboarding = async (payload) => {
 };
 
 export const testLidarrOnboarding = (url, apiKey) =>
-  getData("/onboarding/lidarr/test", {
-    params: lidarrCredentialParams(url, apiKey, { trimUrl: true }),
-  });
+  postData("/onboarding/lidarr/test", { url, apiKey });
 
 export const getLidarrProfilesOnboarding = (url, apiKey) =>
-  getData("/onboarding/lidarr/profiles", {
-    params: lidarrCredentialParams(url, apiKey),
-  });
+  postData("/onboarding/lidarr/profiles", { url, apiKey });
 
 export const getLidarrMetadataProfilesOnboarding = (url, apiKey) =>
-  getData("/onboarding/lidarr/metadata-profiles", {
-    params: lidarrCredentialParams(url, apiKey),
-  });
+  postData("/onboarding/lidarr/metadata-profiles", { url, apiKey });
 
 export const getUsers = () => getData("/users");
 
@@ -103,10 +95,22 @@ export const changeMyPassword = async (currentPassword, newPassword) => {
   await postData("/users/me/password", { currentPassword, newPassword });
 };
 
-export const getMyListeningHistory = () => getData("/users/me/listening-history");
+export const getMyListeningHistory = ({ signal } = {}) =>
+  getData("/users/me/listening-history", { signal });
 
-export const getMyLidarrPreferences = () =>
-  getData("/users/me/lidarr-preferences");
+export const recordPlayEvent = (payload) => postData("/play-events", payload);
+
+export const getScrobbleStatus = () => getData("/scrobbling/status");
+export const getLastfmScrobbleLink = () => getData("/scrobbling/lastfm/link");
+export const linkListenBrainz = (token) =>
+  putData("/scrobbling/listenbrainz/link", { token });
+export const unlinkScrobbleProvider = (provider) =>
+  deleteData(`/scrobbling/${provider}/link`);
+export const linkKoito = (token, url) =>
+  putData("/scrobbling/koito/link", { token, url });
+
+export const getMyLidarrPreferences = ({ signal } = {}) =>
+  getData("/users/me/lidarr-preferences", { signal });
 
 export const getMyDiscoverLayout = () => getData("/users/me/discover-layout");
 

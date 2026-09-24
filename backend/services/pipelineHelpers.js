@@ -1,3 +1,5 @@
+import { logger } from "./logger.js";
+
 export function getPayloadCandidate(payload) {
   const candidateIndex = Number(payload?.candidateIndex || 0);
   return (
@@ -42,12 +44,17 @@ export function blockPipelineJobForReview({
   sourcePath,
 }) {
   const stagingPath = String(sourcePath || "").trim();
-  if (job?.upgradeForJobId || !validation?.blocked || !stagingPath) return false;
+  if (!validation?.blocked || !stagingPath) return false;
   const reason = validation.reason || "Blocked for review";
   if (!downloadTracker.setBlocked(job.id, reason, stagingPath)) return false;
   import("./aurralHistoryService.js")
     .then(({ recordTrackJobBlocked }) => recordTrackJobBlocked(job, reason))
-    .catch(() => {});
+    .catch((error) => {
+      logger.warn("history", "Could not record blocked download job", {
+        jobId: job.id,
+        reason: error?.message || String(error),
+      });
+    });
   return true;
 }
 
@@ -67,16 +74,28 @@ export async function finalizePipelineJobSuccess({
   downloadTracker.setDone(job.id, committedFinalPath, album);
   if (quality) downloadTracker.updateQuality(job.id, quality);
 
+  if (job.playlistType === "library" && job.managedBy === "aurral" && committedFinalPath) {
+    const { scheduleLibraryScan } = await import("./libraryScanWorker.js");
+    scheduleLibraryScan({
+      includeLidarr: false,
+      changedPaths: [committedFinalPath],
+    });
+  }
+
   if (onSuccess) await onSuccess();
 
   import("./aurralHistoryService.js")
     .then(({ recordTrackJobCompleted }) => recordTrackJobCompleted(job))
-    .catch(() => {});
+    .catch((error) => {
+      logger.warn("history", "Could not record completed download job", {
+        jobId: job.id,
+        reason: error?.message || String(error),
+      });
+    });
 
   const playlistType = job.playlistId || job.playlistType;
   const { playlistManager } = await import("./weeklyFlow/weeklyFlowPlaylistManager.js");
   await playlistManager.refreshPlaylist(playlistType);
-  playlistManager.scheduleScanLibrary();
   const { weeklyFlowWorker } = await import("./weeklyFlow/weeklyFlowWorker.js");
   weeklyFlowWorker.wake(0);
   await weeklyFlowWorker.checkPlaylistComplete(playlistType);

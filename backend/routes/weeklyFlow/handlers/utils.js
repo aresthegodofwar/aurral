@@ -81,6 +81,7 @@ export const validateFlowPayload = ({
   tags,
   relatedArtists,
   scheduleDays,
+  recordHistory,
   yearFrom,
   yearTo,
 } = {}) => {
@@ -105,6 +106,9 @@ export const validateFlowPayload = ({
   }
   if (!Array.isArray(scheduleDays) || scheduleDays.length === 0) {
     return "scheduleDays must include at least one day";
+  }
+  if (recordHistory !== undefined && typeof recordHistory !== "boolean") {
+    return "recordHistory must be a boolean";
   }
   const hasYearFrom = yearFrom != null && String(yearFrom).trim() !== "";
   const hasYearTo = yearTo != null && String(yearTo).trim() !== "";
@@ -131,7 +135,7 @@ export const markFlowMutationToken = (flowId) => {
 };
 
 export const pauseSharedPlaylistRetryCycle = async (playlistId) => {
-  weeklyFlowWorker.setRetryCyclePaused(playlistId, true);
+  await weeklyFlowWorker.setRetryCyclePaused(playlistId, true);
   let cancelledJobs = 0;
   await withPlaylistMutation(playlistId, async () => {
     cancelledJobs = downloadTracker.failActiveJobsForPlaylist(
@@ -169,7 +173,7 @@ export const canAccessPlaylistType = (user, playlistType) => {
 
 export const filterJobsForUser = (user, jobs) =>
   (Array.isArray(jobs) ? jobs : []).filter((job) =>
-    canAccessPlaylistType(user, job?.playlistType),
+    canAccessPlaylistType(user, job?.playlistId || job?.playlistType),
   );
 
 export const queueFlowSideEffect = (kind, labelPrefix, flowId) => {

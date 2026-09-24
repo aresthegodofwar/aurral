@@ -1,5 +1,5 @@
 import { getLastfmApiKey, lastfmRequest } from "../../../services/apiClients/index.js";
-import { libraryManager } from "../../../services/libraryManager.js";
+import { getCanonicalArtistKeyProjection } from "../../../services/libraryQueryService.js";
 import { getDiscoveryCache } from "../../../services/discovery/index.js";
 import { buildImageProxyUrl } from "../../../services/imageProxyService.js";
 import { extractLastfmImageUrl } from "../../artists/shared/transform.js";
@@ -109,7 +109,7 @@ export function registerTags(router) {
                     sortName: artist.name,
                     type: "Artist",
                     tags: [tag],
-                    image: buildImageProxyUrl(imageUrl) || imageUrl,
+                    image: buildImageProxyUrl(imageUrl),
                   };
                 })
                 .filter((a) => a.id);
@@ -124,7 +124,7 @@ export function registerTags(router) {
             offset: offsetInt,
             existingArtistKeys: includeLibraryFlag
               ? new Set()
-              : buildArtistKeySet(await libraryManager.getAllArtists()),
+              : buildArtistKeySet(getCanonicalArtistKeyProjection()),
           });
           if (fallbackResult) {
             return res.json({

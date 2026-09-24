@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Ban, Library, Loader2, MoreVertical, ThumbsDown, ThumbsUp } from "lucide-react";
+import { Ban, Library, MoreVertical, ThumbsDown, ThumbsUp } from "lucide-react";
 import { getDiscoveryFeedbackLabel } from "../utils/discoveryFeedback";
 import TooltipButton from "./TooltipButton";
+import { DotLoader } from "./DotLoader";
+import Tooltip from "./Tooltip";
 
 const getMenuHorizontalAnchorRect = (button) => {
   const discoverCard = button.closest(".artist-discover-card");
@@ -26,6 +28,7 @@ export function ArtistContextMenu({
   isInLibrary = false,
   canAddArtist = false,
   onAddToLibrary,
+  onOpenInLibrary,
   onFeedback,
   feedbackUsed = {},
   className = "",
@@ -40,6 +43,14 @@ export function ArtistContextMenu({
   const closeMenuRef = useRef(null);
   const labelName = artistName || artist?.name || artist?.artistName || "artist";
   const isInlineActions = menuLayout === "inline";
+  const hasLibraryItem =
+    (canAddArtist && onAddToLibrary) || (isInLibrary && onOpenInLibrary);
+  const libraryAction = isInLibrary ? onOpenInLibrary : onAddToLibrary;
+  const libraryLabel = isInLibrary
+    ? onOpenInLibrary
+      ? "Open in library"
+      : "In library"
+    : "Add to library";
 
   const closeMenu = useCallback(() => {
     setShowMenu(false);
@@ -59,10 +70,10 @@ export function ArtistContextMenu({
 
   const estimateMenuHeight = useCallback(() => {
     let items = 0;
-    if (canAddArtist && onAddToLibrary) items += 1;
+    if (hasLibraryItem) items += 1;
     if (onFeedback) items += 3;
     return Math.max(items, 1) * 42 + 8;
-  }, [canAddArtist, onAddToLibrary, onFeedback]);
+  }, [hasLibraryItem, onFeedback]);
 
   const updateMenuPosition = useCallback(() => {
     const button = menuButtonRef.current;
@@ -184,7 +195,7 @@ export function ArtistContextMenu({
     setPendingAction(null);
   };
 
-  const showMenuTrigger = (canAddArtist && onAddToLibrary) || onFeedback;
+  const showMenuTrigger = hasLibraryItem || onFeedback;
 
   if (!showMenuTrigger) return null;
 
@@ -195,15 +206,15 @@ export function ArtistContextMenu({
         style={{ position: "relative", flexShrink: 0 }}
         onClick={(event) => event.stopPropagation()}
       >
-        {canAddArtist && onAddToLibrary && (
+        {hasLibraryItem && (
           <TooltipButton
-            label={isInLibrary ? "In library" : "Add to library"}
-            onClick={(event) => handleAction(event, "library", onAddToLibrary)}
-            disabled={isInLibrary || !!pendingAction}
+            label={libraryLabel}
+            onClick={(event) => handleAction(event, "library", libraryAction)}
+            disabled={!libraryAction || !!pendingAction}
             className={`btn btn-icon-square artist-context-menu__inline-action${isInLibrary ? " is-selected" : ""}`}
           >
             {pendingAction === "library" ? (
-              <Loader2 className="artist-icon-sm animate-spin" />
+              <DotLoader size="sm" label={null} />
             ) : (
               <Library className="artist-icon-sm" />
             )}
@@ -218,7 +229,7 @@ export function ArtistContextMenu({
               className={`btn btn-icon-square artist-context-menu__inline-action${feedbackUsed.more_like_this ? " is-selected" : ""}`}
             >
               {pendingAction === "more_like_this" ? (
-                <Loader2 className="artist-icon-sm animate-spin" />
+                <DotLoader size="sm" label={null} />
               ) : (
                 <ThumbsUp className="artist-icon-sm" />
               )}
@@ -230,7 +241,7 @@ export function ArtistContextMenu({
               className={`btn btn-icon-square artist-context-menu__inline-action${feedbackUsed.less_like_this ? " is-selected" : ""}`}
             >
               {pendingAction === "less_like_this" ? (
-                <Loader2 className="artist-icon-sm animate-spin" />
+                <DotLoader size="sm" label={null} />
               ) : (
                 <ThumbsDown className="artist-icon-sm" />
               )}
@@ -242,7 +253,7 @@ export function ArtistContextMenu({
               className={`btn btn-icon-square artist-context-menu__inline-action artist-context-menu__inline-action--danger${feedbackUsed.block_artist ? " is-selected" : ""}`}
             >
               {pendingAction === "block_artist" ? (
-                <Loader2 className="artist-icon-sm animate-spin" />
+                <DotLoader size="sm" label={null} />
               ) : (
                 <Ban className="artist-icon-sm" />
               )}
@@ -285,86 +296,90 @@ export function ArtistContextMenu({
               }}
               onClick={(event) => event.stopPropagation()}
             >
-              {canAddArtist && onAddToLibrary && (
-                <button
-                  type="button"
-                  onClick={(event) => handleAction(event, "library", onAddToLibrary)}
-                  disabled={isInLibrary || !!pendingAction}
-                  className="artist-menu-item--discover"
-                  aria-label={isInLibrary ? "In library" : "Add to library"}
-                  title={isInLibrary ? "In library" : "Add to library"}
-                >
-                  <div className="artist-menu-item__main--discover">
-                    {pendingAction === "library" ? (
-                      <Loader2 className="artist-icon-sm animate-spin" />
-                    ) : (
-                      <Library className="artist-icon-sm" />
-                    )}
-                    <span className="artist-menu-item__text--discover">
-                      {isInLibrary ? "In Library" : "Add to Library"}
-                    </span>
-                  </div>
-                </button>
+              {hasLibraryItem && (
+                <Tooltip content={libraryLabel}>
+                  <button
+                    type="button"
+                    onClick={(event) => handleAction(event, "library", libraryAction)}
+                    disabled={!libraryAction || !!pendingAction}
+                    className="artist-menu-item--discover"
+                    aria-label={libraryLabel}
+                  >
+                    <div className="artist-menu-item__main--discover">
+                      {pendingAction === "library" ? (
+                        <DotLoader size="sm" label={null} />
+                      ) : (
+                        <Library className="artist-icon-sm" />
+                      )}
+                      <span className="artist-menu-item__text--discover">
+                        {libraryLabel}
+                      </span>
+                    </div>
+                  </button>
+                </Tooltip>
               )}
               {onFeedback && (
                 <>
-                  <button
-                    type="button"
-                    onClick={(event) => handleFeedbackClick(event, "more_like_this")}
-                    disabled={!!pendingAction}
-                    className={`artist-menu-item--discover${feedbackUsed.more_like_this ? " is-selected" : ""}`}
-                    aria-label={getDiscoveryFeedbackLabel("more_like_this")}
-                    title={getDiscoveryFeedbackLabel("more_like_this")}
-                  >
-                    <div className="artist-menu-item__main--discover">
-                      {pendingAction === "more_like_this" ? (
-                        <Loader2 className="artist-icon-sm animate-spin" />
-                      ) : (
-                        <ThumbsUp className="artist-icon-sm" />
-                      )}
-                      <span className="artist-menu-item__text--discover">
-                        {getDiscoveryFeedbackLabel("more_like_this")}
-                      </span>
-                    </div>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={(event) => handleFeedbackClick(event, "less_like_this")}
-                    disabled={!!pendingAction}
-                    className={`artist-menu-item--discover${feedbackUsed.less_like_this ? " is-selected" : ""}`}
-                    aria-label={getDiscoveryFeedbackLabel("less_like_this")}
-                    title={getDiscoveryFeedbackLabel("less_like_this")}
-                  >
-                    <div className="artist-menu-item__main--discover">
-                      {pendingAction === "less_like_this" ? (
-                        <Loader2 className="artist-icon-sm animate-spin" />
-                      ) : (
-                        <ThumbsDown className="artist-icon-sm" />
-                      )}
-                      <span className="artist-menu-item__text--discover">
-                        {getDiscoveryFeedbackLabel("less_like_this")}
-                      </span>
-                    </div>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={(event) => handleFeedbackClick(event, "block_artist")}
-                    disabled={!!pendingAction}
-                    className={`artist-menu-item--discover artist-menu-item--danger${feedbackUsed.block_artist ? " is-selected" : ""}`}
-                    aria-label={feedbackUsed.block_artist ? "Unblock artist" : getDiscoveryFeedbackLabel("block_artist")}
-                    title={feedbackUsed.block_artist ? "Unblock artist" : getDiscoveryFeedbackLabel("block_artist")}
-                  >
-                    <div className="artist-menu-item__main--discover">
-                      {pendingAction === "block_artist" ? (
-                        <Loader2 className="artist-icon-sm animate-spin" />
-                      ) : (
-                        <Ban className="artist-icon-sm" />
-                      )}
-                      <span className="artist-menu-item__text--discover">
-                        {feedbackUsed.block_artist ? "Unblock artist" : getDiscoveryFeedbackLabel("block_artist")}
-                      </span>
-                    </div>
-                  </button>
+                  <Tooltip content={getDiscoveryFeedbackLabel("more_like_this")}>
+                    <button
+                      type="button"
+                      onClick={(event) => handleFeedbackClick(event, "more_like_this")}
+                      disabled={!!pendingAction}
+                      className={`artist-menu-item--discover${feedbackUsed.more_like_this ? " is-selected" : ""}`}
+                      aria-label={getDiscoveryFeedbackLabel("more_like_this")}
+                    >
+                      <div className="artist-menu-item__main--discover">
+                        {pendingAction === "more_like_this" ? (
+                          <DotLoader size="sm" label={null} />
+                        ) : (
+                          <ThumbsUp className="artist-icon-sm" />
+                        )}
+                        <span className="artist-menu-item__text--discover">
+                          {getDiscoveryFeedbackLabel("more_like_this")}
+                        </span>
+                      </div>
+                    </button>
+                  </Tooltip>
+                  <Tooltip content={getDiscoveryFeedbackLabel("less_like_this")}>
+                    <button
+                      type="button"
+                      onClick={(event) => handleFeedbackClick(event, "less_like_this")}
+                      disabled={!!pendingAction}
+                      className={`artist-menu-item--discover${feedbackUsed.less_like_this ? " is-selected" : ""}`}
+                      aria-label={getDiscoveryFeedbackLabel("less_like_this")}
+                    >
+                      <div className="artist-menu-item__main--discover">
+                        {pendingAction === "less_like_this" ? (
+                          <DotLoader size="sm" label={null} />
+                        ) : (
+                          <ThumbsDown className="artist-icon-sm" />
+                        )}
+                        <span className="artist-menu-item__text--discover">
+                          {getDiscoveryFeedbackLabel("less_like_this")}
+                        </span>
+                      </div>
+                    </button>
+                  </Tooltip>
+                  <Tooltip content={feedbackUsed.block_artist ? "Unblock artist" : getDiscoveryFeedbackLabel("block_artist")}>
+                    <button
+                      type="button"
+                      onClick={(event) => handleFeedbackClick(event, "block_artist")}
+                      disabled={!!pendingAction}
+                      className={`artist-menu-item--discover artist-menu-item--danger${feedbackUsed.block_artist ? " is-selected" : ""}`}
+                      aria-label={feedbackUsed.block_artist ? "Unblock artist" : getDiscoveryFeedbackLabel("block_artist")}
+                    >
+                      <div className="artist-menu-item__main--discover">
+                        {pendingAction === "block_artist" ? (
+                          <DotLoader size="sm" label={null} />
+                        ) : (
+                          <Ban className="artist-icon-sm" />
+                        )}
+                        <span className="artist-menu-item__text--discover">
+                          {feedbackUsed.block_artist ? "Unblock artist" : getDiscoveryFeedbackLabel("block_artist")}
+                        </span>
+                      </div>
+                    </button>
+                  </Tooltip>
                 </>
               )}
             </div>,

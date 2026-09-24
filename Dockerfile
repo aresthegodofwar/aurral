@@ -1,4 +1,4 @@
-FROM node:26.5.1-bookworm-slim@sha256:9e6f9357d371591e32ab6f2d8a26d63bdd0d17c29eee3f4f3e7e454d9634bf73 AS node-base
+FROM node:26.9.0-bookworm-slim@sha256:582460f614631b59b824ac6020533b9bf339c7fdf3a6d7db31abb6b4065f0212 AS node-base
 
 FROM node-base AS builder
 
@@ -38,6 +38,22 @@ RUN --mount=type=cache,target=/root/.npm,sharing=locked \
     node -e "require('sharp')" && \
     node --input-type=module -e "import honker from '@russellthehippo/honker-node'; honker.open('/tmp/honker-smoke.db'); console.log('honker ok')"
 
+# Bundled beets matcher. Aurral owns this venv; users never install or run
+# beets themselves and no extra service or port is involved.
+FROM node-base AS matcher-deps
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY backend/matcher/requirements.txt /tmp/aurral-matcher-requirements.txt
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1
+RUN python3 -m venv /opt/aurral-matcher && \
+    /opt/aurral-matcher/bin/pip install --no-compile -r /tmp/aurral-matcher-requirements.txt && \
+    /opt/aurral-matcher/bin/python -c "import beets; assert beets.__version__ == '2.14.1'"
+
 FROM node-base AS runtime
 
 WORKDIR /app
@@ -57,10 +73,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && mkdir -p /app/backend/data /config \
     && chown -R nodejs:nodejs /app/backend/data /config
 
-ENV LD_PRELOAD=libjemalloc.so.2
+ENV LD_PRELOAD=libjemalloc.so.2 \
+    MALLOC_CONF=background_thread:true,dirty_decay_ms:1000,muzzy_decay_ms:1000
 
-ADD --chmod=755 --checksum=sha256:e5d57466682cfa9d61e9cf7c8a4f09b00f4a62af37d3bbdc4bcffdf63615feac \
-    https://github.com/yt-dlp/yt-dlp/releases/download/2026.06.09/yt-dlp \
+ADD --chmod=755 --checksum=sha256:1fa6733c37ea6fb51c99ad8fe785e7b7e5f3246c9b980230329d4fb72ed8d4d6 \
+    https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp \
     /usr/local/bin/yt-dlp
 RUN yt-dlp --version
 
@@ -68,6 +85,7 @@ COPY package*.json ./
 COPY backend/package*.json ./backend/
 COPY frontend/package*.json ./frontend/
 COPY --from=backend-deps /app/node_modules ./node_modules
+COPY --from=matcher-deps /opt/aurral-matcher /opt/aurral-matcher
 
 COPY backend/ ./backend/
 COPY lib/ ./lib/

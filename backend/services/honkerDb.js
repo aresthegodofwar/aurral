@@ -2,9 +2,17 @@ import fs from "fs";
 import path from "path";
 import honker from "@russellthehippo/honker-node";
 import { resolveAurralDataDir } from "../config/data-dir.js";
+import { dbOps } from "../db/helpers/index.js";
+import { resolvePlaylistRoot } from "./playlistPaths.js";
+import { shouldStartQueueHere } from "./backgroundWorkerQueues.js";
+
+export const PLAYLIST_STARTUP_MIGRATION_VERSION = 1;
+export const PLAYLIST_STARTUP_MIGRATION_SETTING = "playlistStartupMigration";
 
 export const HONKER_QUEUE_NAMES = [
   "system-task",
+  "system-task-maintenance",
+  "system-task-inbox",
   "weekly-flow-operation",
   "slskd-pipeline",
   "playlist-retry",
@@ -15,6 +23,7 @@ export const HONKER_QUEUE_NAMES = [
   "discovery-playlist-build",
   "discovery-user-refresh",
   "_outbox:notifications",
+  "_outbox:play-events",
 ];
 
 function resolveHonkerDbPath() {
@@ -26,11 +35,13 @@ function resolveHonkerDbPath() {
 let honkerDb = null;
 let openedHonkerDbPath = null;
 let notificationOutbox = null;
+let playEventOutbox = null;
 let honkerSchedulerStarted = false;
 let honkerSchedulerAbort = null;
 let honkerSchedulerPromise = null;
 const WORKER_ID = `aurral-${process.pid}`;
 const DEFAULT_HONKER_WATCHER_POLL_MS = 25;
+const MISSED_FIRE_GRACE_S = 300;
 
 export function getHonkerOpenOptions() {
   const configured = Number(process.env.AURRAL_HONKER_WATCHER_POLL_MS);
@@ -43,13 +54,13 @@ export function getHonkerOpenOptions() {
 export const SCHEDULED_SYSTEM_TASKS = [
   {
     name: "weekly-flow-refresh",
-    queue: "system-task",
+    queue: "system-task-maintenance",
     schedule: "@every 1h",
     payload: { kind: "weekly-flow-refresh" },
   },
   {
     name: "session-cleanup",
-    queue: "system-task",
+    queue: "system-task-maintenance",
     schedule: "@every 1h",
     payload: { kind: "session-cleanup" },
   },
@@ -74,13 +85,13 @@ export const SCHEDULED_SYSTEM_TASKS = [
   },
   {
     name: "inbox-refresh",
-    queue: "system-task",
+    queue: "system-task-inbox",
     schedule: "@every 24h",
     payload: { kind: "inbox-refresh" },
   },
   {
     name: "news-refresh",
-    queue: "system-task",
+    queue: "system-task-maintenance",
     schedule: "@every 15m",
     payload: { kind: "news-refresh" },
   },
@@ -132,6 +143,17 @@ function resolveEnqueueRunAt(options) {
   return null;
 }
 
+function parseHonkerPayload(value) {
+  try {
+    const payload = typeof value === "string" ? JSON.parse(value) : value;
+    return payload && typeof payload === "object" && !Array.isArray(payload)
+      ? payload
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 function createHonkerQueue({
   name,
   visibilityTimeoutS,
@@ -155,10 +177,12 @@ function createHonkerQueue({
     const runAt = resolveEnqueueRunAt(options);
     const priority = defaultPriorityFn(payload, options);
     const jobId = q.enqueue(payload, { priority, runAt });
-    if (!(skipInTest && process.env.NODE_ENV === "test")) {
+    if (shouldStartQueueHere(name) && !(skipInTest && process.env.NODE_ENV === "test")) {
       import(workerModule)
         .then((mod) => mod[workerStartFn]())
         .catch((err) => { console.warn(err); });
+    } else if (process.env.AURRAL_BACKGROUND_WORKER_GROUP && process.connected) {
+      process.send({ type: "queue-wake", queue: name });
     }
     return jobId;
   }
@@ -274,12 +298,45 @@ const systemTask = registerQueue({
 });
 
 export const getSystemTaskQueue = systemTask.getQueue;
-export const enqueueSystemTaskJob = systemTask.enqueueJob;
+
+const maintenanceTask = registerQueue({
+  name: "system-task-maintenance",
+  visibilityTimeoutS: 3600,
+  maxAttempts: 3,
+  workerModule: "./systemTaskWorker.js",
+  workerStartFn: "startMaintenanceTaskWorker",
+});
+export const getMaintenanceTaskQueue = maintenanceTask.getQueue;
+
+const inboxTask = registerQueue({
+  name: "system-task-inbox",
+  visibilityTimeoutS: 3600,
+  maxAttempts: 3,
+  workerModule: "./systemTaskWorker.js",
+  workerStartFn: "startInboxTaskWorker",
+});
+export const getInboxTaskQueue = inboxTask.getQueue;
+
+export function getSystemTaskQueueName(kind) {
+  if (kind === "inbox-refresh") return "system-task-inbox";
+  if (kind === "session-cleanup" || kind === "news-refresh" ||
+      kind === "weekly-flow-refresh") return "system-task-maintenance";
+  return "system-task";
+}
+
+export function enqueueSystemTaskJob(payload, options) {
+  switch (getSystemTaskQueueName(payload?.kind)) {
+    case "system-task-inbox": return inboxTask.enqueueJob(payload, options);
+    case "system-task-maintenance": return maintenanceTask.enqueueJob(payload, options);
+    default: return systemTask.enqueueJob(payload, options);
+  }
+}
 
 const libraryScan = registerQueue({
   name: "library-scan",
   visibilityTimeoutS: 600,
   maxAttempts: 3,
+  skipInTest: true,
   workerModule: "./libraryScanWorker.js",
   workerStartFn: "startLibraryScanWorker",
 });
@@ -309,11 +366,42 @@ export function getNotificationOutbox() {
 
 export function enqueueNotification(payload) {
   const jobId = getNotificationOutbox().enqueue(payload);
-  import("./notificationOutboxWorker.js")
-    .then(({ startNotificationOutboxWorker }) =>
-      startNotificationOutboxWorker(),
-    )
-    .catch((err) => { console.warn(err); });  return jobId;
+  if (shouldStartQueueHere("_outbox:notifications")) {
+    import("./notificationOutboxWorker.js")
+      .then(({ startNotificationOutboxWorker }) => startNotificationOutboxWorker())
+      .catch((err) => { console.warn(err); });
+  } else if (process.env.AURRAL_BACKGROUND_WORKER_GROUP && process.connected) {
+    process.send({ type: "queue-wake", queue: "_outbox:notifications" });
+  }
+  return jobId;
+}
+
+export function getPlayEventOutbox() {
+  if (!playEventOutbox) {
+    playEventOutbox = getHonkerDb().outbox(
+      "play-events",
+      async (payload, job) => {
+        const { deliverPlayEvent } = await import("./playEventService.js");
+        const { withJobHeartbeat } = await import("./honkerWorkerRuntime.js");
+        const outbox = getPlayEventOutbox();
+        await withJobHeartbeat(job, outbox.queue, () => deliverPlayEvent(payload));
+      },
+      { visibilityTimeoutS: 120, maxAttempts: 5, baseBackoffS: 30 },
+    );
+  }
+  return playEventOutbox;
+}
+
+export function enqueuePlayEventDelivery(payload) {
+  const jobId = getPlayEventOutbox().enqueue(payload);
+  if (shouldStartQueueHere("_outbox:play-events")) {
+    import("./playEventOutboxWorker.js")
+      .then(({ startPlayEventOutboxWorker }) => startPlayEventOutboxWorker())
+      .catch((err) => { console.warn(err); });
+  } else if (process.env.AURRAL_BACKGROUND_WORKER_GROUP && process.connected) {
+    process.send({ type: "queue-wake", queue: "_outbox:play-events" });
+  }
+  return jobId;
 }
 
 export function bootstrapHonkerSchedules() {
@@ -348,7 +436,13 @@ export function bootstrapHonkerSchedules() {
     }
 
     const updates = {};
-    if (existing.cron_expr !== task.schedule) updates.schedule = task.schedule;
+    if (
+      existing.cron_expr !== task.schedule ||
+      Number(existing.next_fire_at || 0) <=
+        Math.floor(Date.now() / 1000) - MISSED_FIRE_GRACE_S
+    ) {
+      updates.schedule = task.schedule;
+    }
     if (existing.payload !== payloadText) updates.payload = task.payload;
     if (Number(existing.priority) !== priority) updates.priority = priority;
     if ((existing.expires_s ?? null) !== expiresS) updates.expiresS = expiresS;
@@ -365,23 +459,70 @@ export function bootstrapHonkerSchedules() {
 }
 
 export function enqueueHonkerStartupTasks() {
-  enqueueSystemTaskJob({ kind: "playlist-startup-migration" }, { delaySeconds: 3, priority: 10 });
-  enqueueSystemTaskJob({ kind: "weekly-flow-startup-check" }, { delaySeconds: 5, priority: 5 });
-  enqueueSystemTaskJob({ kind: "quality-profile-refresh" }, { delaySeconds: 10, priority: -10 });
-  enqueueSystemTaskJob(
-    { kind: "weekly-flow-startup-reuse-repair" },
-    { delaySeconds: 15, priority: 5 },
+  const enqueueIfAbsent = (payload, options) => {
+    const existing = findActiveHonkerJob(
+      getSystemTaskQueueName(payload.kind),
+      (candidate) => candidate?.kind === payload.kind,
+      { recoverExpired: true },
+    );
+    return existing?.id || enqueueSystemTaskJob(payload, options);
+  };
+  const migration = dbOps.getJSONSetting(PLAYLIST_STARTUP_MIGRATION_SETTING);
+  if (
+    migration?.version !== PLAYLIST_STARTUP_MIGRATION_VERSION ||
+    path.resolve(String(migration?.rootPath || "")) !== resolvePlaylistRoot()
+  ) {
+    enqueueIfAbsent(
+      { kind: "playlist-startup-migration" },
+      { delaySeconds: 3, priority: 10 },
+    );
+  }
+  enqueueIfAbsent({ kind: "weekly-flow-startup-check" }, { delaySeconds: 5, priority: 5 });
+  enqueueIfAbsent({ kind: "discovery-bootstrap" }, { delaySeconds: 15, priority: 5 });
+  enqueueIfAbsent({ kind: "library-index-bootstrap" }, { delaySeconds: 8, priority: 0 });
+}
+
+export function findActiveHonkerJob(
+  queueName,
+  predicate = () => true,
+  { recoverExpired = false, payloadKind = "" } = {},
+) {
+  const safeQueue = String(queueName || "").trim();
+  if (!safeQueue) return null;
+  const safePayloadKind = String(payloadKind || "").trim();
+  const queue = getHonkerQueueByName(safeQueue);
+  if (recoverExpired) {
+    try {
+      queue?.sweepExpired();
+    } catch {}
+  }
+  const now = Math.floor(Date.now() / 1000);
+  const payloadKindFilter = safePayloadKind
+    ? "AND json_extract(payload, '$.kind') = ?"
+    : "";
+  const parameters = safePayloadKind
+    ? [safeQueue, safePayloadKind, now]
+    : [safeQueue, now];
+  const rows = getHonkerDb().query(
+    `
+      SELECT id, payload, state, run_at, claim_expires_at, attempts
+      FROM _honker_live
+      WHERE queue = ?
+        ${payloadKindFilter}
+        AND (
+          state = 'pending'
+          OR (state = 'processing' AND (claim_expires_at IS NULL OR claim_expires_at > ?))
+        )
+      ORDER BY id ASC
+      LIMIT 100
+    `,
+    parameters,
   );
-  enqueueSystemTaskJob({ kind: "discovery-bootstrap" }, { delaySeconds: 15, priority: 5 });
-  enqueueSystemTaskJob({ kind: "inbox-refresh" }, { delaySeconds: 20, priority: -5 });
-  enqueuePlaylistMbidEnrichmentJob(
-    {
-      kind: "playlist-mbid-enrichment-sweep",
-      reason: "startup",
-      reconcileArtistMbids: true,
-    },
-    { delaySeconds: 30, priority: -5 },
-  );
+  for (const row of rows) {
+    const payload = parseHonkerPayload(row.payload);
+    if (predicate(payload, row)) return { ...row, payload };
+  }
+  return null;
 }
 
 export function startHonkerScheduler() {
@@ -429,6 +570,7 @@ export function closeHonkerDb() {
     reset();
   }
   notificationOutbox = null;
+  playEventOutbox = null;
 }
 
 export function isHonkerLockHeld(name) {
@@ -546,6 +688,9 @@ export function sweepAllHonkerQueues() {
 export function getHonkerQueueByName(queueName) {
   if (queueName === "_outbox:notifications") {
     return getNotificationOutbox().queue;
+  }
+  if (queueName === "_outbox:play-events") {
+    return getPlayEventOutbox().queue;
   }
   return queueByName.get(queueName)?.getQueue() ?? null;
 }

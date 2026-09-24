@@ -7,11 +7,14 @@ import { DISCOVERY_MANUAL_REFRESH_KEY } from "./utils/discoverRecentNavigation.j
 import { AudioPlayerProvider } from "react-use-audio-player";
 import { ToastProvider, useToast } from "./contexts/ToastContext";
 import { AuthProvider, useAuth } from "./contexts/AuthContext";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { queryClient } from "./queryClient";
 import { DiscoverRecentProvider } from "./contexts/DiscoverRecentProvider";
 import { AudioQueueProvider } from "./contexts/AudioQueueProvider";
 import { AlertTriangle, XCircle } from "lucide-react";
 import ReloadPrompt from "./components/ReloadPrompt";
 import UpdateIndicator from "./components/UpdateIndicator";
+import { DotLoader } from "./components/DotLoader";
 import { useWebSocketChannel } from "./hooks/useWebSocket";
 import { buildActivityPath, DEFAULT_ACTIVITY_VIEW } from "./navigation/activityNavConfig";
 import { getBootstrapPollIntervalMs } from "./utils/requestScheduling.js";
@@ -50,13 +53,13 @@ const NewsPage = lazy(() => import("./pages/NewsPage"));
 
 const PageLoader = () => (
   <div className="app-loading">
-    <div className="app-loading__spinner" />
+    <DotLoader size="xl" />
   </div>
 );
 
 const ScreenLoader = () => (
   <div className="app-loading app-loading--screen">
-    <div className="app-loading__spinner app-loading__spinner--lg" />
+    <DotLoader size="2xl" />
   </div>
 );
 
@@ -259,16 +262,27 @@ function AppContent() {
                       <Route path="/discover/playlists/:presetId" element={<DiscoverPlaylistDetailPage />} />
                       <Route path="/discover/playlists" element={<DiscoverPlaylistsPage />} />
                       <Route path="/discover/news" element={<NewsPage />} />
-                      <Route path="/library" element={<LibraryPage />} />
                       <Route
-                        path="/playlists"
+                        path="/library/playlists"
                         element={
                           <PermissionRoute permission="accessFlow">
-                            <FlowPage />
+                            <FlowPage mode="playlists" />
                           </PermissionRoute>
                         }
                       />
-                      <Route path="/flow" element={<Navigate to="/playlists" replace />} />
+                      <Route path="/library/album/:albumId" element={<LibraryPage />} />
+                      <Route path="/library/artist/:artistId" element={<LibraryPage />} />
+                      <Route path="/library/:section?" element={<LibraryPage />} />
+                      <Route
+                        path="/flows"
+                        element={
+                          <PermissionRoute permission="accessFlow">
+                            <FlowPage mode="flows" />
+                          </PermissionRoute>
+                        }
+                      />
+                      <Route path="/playlists" element={<Navigate to="/library/playlists" replace />} />
+                      <Route path="/flow" element={<Navigate to="/flows" replace />} />
                       <Route path="/downloads" element={<Navigate to="/activity/queue" replace />} />
                       <Route path="/requests" element={<Navigate to="/activity/queue" replace />} />
                       <Route path="/history" element={<Navigate to="/activity/history" replace />} />
@@ -310,7 +324,8 @@ function AppContent() {
 
 function App() {
   return (
-    <ToastProvider>
+    <QueryClientProvider client={queryClient}>
+      <ToastProvider>
         <AuthProvider>
           <AudioPlayerProvider>
             <AudioQueueProvider>
@@ -320,6 +335,7 @@ function App() {
           </AudioPlayerProvider>
         </AuthProvider>
       </ToastProvider>
+    </QueryClientProvider>
   );
 }
 

@@ -7,7 +7,11 @@ import {
   DEFAULT_METADATA_BASE_URL,
   MUSICBRAINZ_API,
 } from "../../config/constants.js";
-import { rankAlbumCandidates, rankArtistCandidates } from "./brainzmashRanking.js";
+import {
+  rankAlbumCandidates,
+  rankArtistCandidates,
+  scoreTextMatch,
+} from "./brainzmashRanking.js";
 import {
   toLegacyArtist,
   toLegacyRelease,
@@ -19,16 +23,46 @@ import {
   toNormalizedArtistAlbum,
 } from "./brainzmashMappers.js";
 import { selectBestAlbumImage } from "../imageService.js";
+import createRateLimiter from "../apiClients/rateLimiter.js";
 import { runSharedInflight } from "../sharedInflight.js";
 
-const providerCache = createCache(300);
+const METADATA_ENTITY_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60;
+const METADATA_ENTITY_STALE_TTL_SECONDS = 30 * 24 * 60 * 60;
+const METADATA_SEARCH_CACHE_TTL_SECONDS = 24 * 60 * 60;
+const METADATA_NOT_FOUND_CACHE_TTL_SECONDS = 24 * 60 * 60;
+const METADATA_RATE_LIMIT_FALLBACK_COOLDOWN_MS = 5_000;
+const METADATA_RATE_LIMIT_MAX_COOLDOWN_MS = 60_000;
+const METADATA_FORBIDDEN_COOLDOWN_MS = 5 * 60_000;
+const METADATA_CACHE_MAX_ENTRIES = 20_000;
+const METADATA_REQUEST_MIN_INTERVAL_MS = 100;
+const METADATA_REQUEST_TIMEOUT_MS = 8000;
+const METADATA_MAX_QUEUED_REQUESTS = Math.floor(
+  METADATA_REQUEST_TIMEOUT_MS / METADATA_REQUEST_MIN_INTERVAL_MS,
+) - 1;
+const providerCache = createCache(
+  METADATA_ENTITY_CACHE_TTL_SECONDS,
+  METADATA_CACHE_MAX_ENTRIES,
+);
+const metadataNotFoundCache = createCache(
+  METADATA_NOT_FOUND_CACHE_TTL_SECONDS,
+  METADATA_CACHE_MAX_ENTRIES,
+);
 const releaseCache = createCache(300);
 const providerInflightRequests = new Map();
+const providerRequestLimiter = createRateLimiter(METADATA_REQUEST_MIN_INTERVAL_MS, {
+  maxQueue: METADATA_MAX_QUEUED_REQUESTS,
+});
+const METADATA_MAX_RETRIES = 1;
+let rateLimitCooldown = { baseUrl: null, until: 0 };
+let forbiddenCooldown = { baseUrl: null, until: 0 };
 
 export function clearMetadataProviderCaches() {
   providerCache.flushAll();
+  metadataNotFoundCache.flushAll();
   releaseCache.flushAll();
   providerInflightRequests.clear();
+  rateLimitCooldown = { baseUrl: null, until: 0 };
+  forbiddenCooldown = { baseUrl: null, until: 0 };
 }
 
 const healthState = {
@@ -75,37 +109,184 @@ function getUserAgent() {
   return `${APP_NAME}/${APP_VERSION}`;
 }
 
-async function request(path, params = {}, { signal } = {}) {
+function isEntityMetadataPath(path) {
+  return /^\/(?:album|artist)\/[^/]+$/.test(path);
+}
+
+function createMetadataNotFoundError() {
+  const error = new Error("Metadata resource not found");
+  error.code = "ERR_METADATA_NOT_FOUND";
+  error.response = { status: 404 };
+  return error;
+}
+
+function createMetadataCircuitError(code, status, remainingMs) {
+  const error = new Error(
+    code === "ERR_METADATA_FORBIDDEN"
+      ? "Metadata provider access is temporarily blocked"
+      : "Metadata provider rate limit cooldown is active",
+  );
+  error.code = code;
+  error.retryAfterMs = Math.max(0, Math.ceil(remainingMs));
+  error.response = { status };
+  return error;
+}
+
+function getRetryAfterMs(error) {
+  const retryAfter =
+    error?.response?.headers?.["retry-after"] ?? error?.response?.headers?.["Retry-After"];
+  const seconds = Number(retryAfter);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.min(
+      METADATA_RATE_LIMIT_MAX_COOLDOWN_MS,
+      Math.max(METADATA_RATE_LIMIT_FALLBACK_COOLDOWN_MS, seconds * 1000),
+    );
+  }
+  const retryAt = Date.parse(String(retryAfter || ""));
+  if (Number.isFinite(retryAt)) {
+    return Math.min(
+      METADATA_RATE_LIMIT_MAX_COOLDOWN_MS,
+      Math.max(METADATA_RATE_LIMIT_FALLBACK_COOLDOWN_MS, retryAt - Date.now()),
+    );
+  }
+  return METADATA_RATE_LIMIT_FALLBACK_COOLDOWN_MS;
+}
+
+function getMetadataCircuitError(baseUrl) {
+  const now = Date.now();
+  if (forbiddenCooldown.baseUrl === baseUrl && forbiddenCooldown.until > now) {
+    return createMetadataCircuitError(
+      "ERR_METADATA_FORBIDDEN",
+      403,
+      forbiddenCooldown.until - now,
+    );
+  }
+  if (rateLimitCooldown.baseUrl === baseUrl && rateLimitCooldown.until > now) {
+    return createMetadataCircuitError(
+      "ERR_METADATA_RATE_LIMITED",
+      429,
+      rateLimitCooldown.until - now,
+    );
+  }
+  return null;
+}
+
+function openMetadataCircuit(baseUrl, status, error) {
+  const cooldownMs =
+    status === 403 ? METADATA_FORBIDDEN_COOLDOWN_MS : getRetryAfterMs(error);
+  const currentCooldown = status === 403 ? forbiddenCooldown : rateLimitCooldown;
+  const currentUntil = currentCooldown.baseUrl === baseUrl ? currentCooldown.until : 0;
+  const cooldown = { baseUrl, until: Math.max(currentUntil, Date.now() + cooldownMs) };
+  if (status === 403) forbiddenCooldown = cooldown;
+  else rateLimitCooldown = cooldown;
+}
+
+function isRetryable(error) {
+  return (
+    ["ECONNABORTED", "ETIMEDOUT", "ECONNRESET", "ENOTFOUND", "EAI_AGAIN"].includes(error?.code) ||
+    [408, 425, 429, 500, 502, 503, 504].includes(error?.response?.status)
+  );
+}
+
+function getMetadataCachePolicy(path) {
+  if (isEntityMetadataPath(path)) {
+    return {
+      freshTtlSeconds: METADATA_ENTITY_CACHE_TTL_SECONDS,
+      staleTtlSeconds: METADATA_ENTITY_STALE_TTL_SECONDS,
+    };
+  }
+  return {
+    freshTtlSeconds: METADATA_SEARCH_CACHE_TTL_SECONDS,
+    staleTtlSeconds: 0,
+  };
+}
+
+function refreshMetadata(cacheKey, path, params, { signal } = {}) {
   const baseUrl = getMetadataBaseUrl();
-  const cacheKey = `${baseUrl}${path}:${JSON.stringify(params)}`;
-  const cached = providerCache.get(cacheKey);
-  if (cached) return cached;
+  const cachePolicy = getMetadataCachePolicy(path);
+  const circuitError = getMetadataCircuitError(baseUrl);
+  if (circuitError) return Promise.reject(circuitError);
   healthState.activeBaseUrl = baseUrl;
   healthState.lastCheckedAt = nowIso();
 
   return runSharedInflight(providerInflightRequests, cacheKey, async (sharedSignal) => {
-    try {
-      const response = await axios.get(`${baseUrl}${path}`, {
-        params,
-        timeout: 8000,
-        headers: {
-          "User-Agent": getUserAgent(),
-        },
-        signal: sharedSignal,
-      });
-      providerCache.set(cacheKey, response.data);
-      healthState.lastSuccessAt = healthState.lastCheckedAt;
-      healthState.lastFailureReason = "";
-      return response.data;
-    } catch (error) {
-      healthState.lastFailureAt = healthState.lastCheckedAt;
-      healthState.lastFailureReason =
-        error?.response?.status != null
-          ? `HTTP ${error.response.status}`
-          : error?.code || error?.message || "Unknown error";
-      throw error;
+    for (let attempt = 0; attempt <= METADATA_MAX_RETRIES; attempt += 1) {
+      if (sharedSignal.aborted) throw sharedSignal.reason || new Error("The operation was aborted");
+      try {
+        const response = await providerRequestLimiter.schedule(
+          (remainingMs) => {
+            const activeCircuitError = getMetadataCircuitError(baseUrl);
+            if (activeCircuitError) throw activeCircuitError;
+            return axios.get(`${baseUrl}${path}`, {
+              params,
+              timeout: Number.isFinite(remainingMs)
+                ? Math.max(1, Math.floor(remainingMs))
+                : METADATA_REQUEST_TIMEOUT_MS,
+              headers: {
+                "User-Agent": getUserAgent(),
+              },
+              signal: sharedSignal,
+            });
+          },
+          { signal: sharedSignal, timeoutMs: METADATA_REQUEST_TIMEOUT_MS },
+        );
+        providerCache.set(
+          cacheKey,
+          response.data,
+          cachePolicy.freshTtlSeconds,
+          cachePolicy.staleTtlSeconds,
+        );
+        healthState.lastSuccessAt = healthState.lastCheckedAt;
+        healthState.lastFailureReason = "";
+        return response.data;
+      } catch (error) {
+        if (sharedSignal.aborted) throw sharedSignal.reason || error;
+        healthState.lastFailureAt = healthState.lastCheckedAt;
+        healthState.lastFailureReason =
+          error?.response?.status != null
+            ? `HTTP ${error.response.status}`
+            : error?.code || error?.message || "Unknown error";
+        if ([403, 429].includes(error?.response?.status)) {
+          openMetadataCircuit(baseUrl, error.response.status, error);
+          throw error;
+        }
+        if (error?.response?.status === 404 && isEntityMetadataPath(path)) {
+          providerCache.delete(cacheKey);
+          metadataNotFoundCache.set(cacheKey, true);
+        }
+        if (attempt === METADATA_MAX_RETRIES || !isRetryable(error)) throw error;
+        await new Promise((resolve, reject) => {
+          const onAbort = () => {
+            clearTimeout(timer);
+            reject(sharedSignal.reason || new Error("The operation was aborted"));
+          };
+          const timer = setTimeout(() => {
+            sharedSignal.removeEventListener("abort", onAbort);
+            resolve();
+          }, 250);
+          if (sharedSignal.aborted) onAbort();
+          else sharedSignal.addEventListener("abort", onAbort, { once: true });
+        });
+      }
     }
+    throw new Error("Metadata provider request failed");
   }, { signal });
+}
+
+async function request(path, params = {}, { signal } = {}) {
+  const baseUrl = getMetadataBaseUrl();
+  const cacheKey = `${baseUrl}${path}:${JSON.stringify(params)}`;
+  if (metadataNotFoundCache.get(cacheKey)) {
+    throw createMetadataNotFoundError();
+  }
+  const cached = providerCache.getWithStale(cacheKey);
+  if (cached) {
+    if (cached.stale) {
+      void refreshMetadata(cacheKey, path, params).catch(() => {});
+    }
+    return cached.value;
+  }
+  return refreshMetadata(cacheKey, path, params, { signal });
 }
 
 function applyReleaseTypeFilter(albums, releaseTypes = []) {
@@ -222,8 +403,12 @@ export async function searchAlbums(
   } catch {}
 
   if (items.length === 0 && isNarrowFallbacksEnabled()) {
+    const escapeLucenePhrase = (value) =>
+      String(value || "")
+        .replace(/\\/g, "\\\\")
+        .replace(/"/g, '\\"');
     const mbQuery = artistName
-      ? `artist:"${artistName.replace(/"/g, '\\"')}" AND releasegroup:"${String(query || "").replace(/"/g, '\\"')}"`
+      ? `artist:"${escapeLucenePhrase(artistName)}" AND releasegroup:"${escapeLucenePhrase(query)}"`
       : String(query || "").trim();
     const response = await axios.get(`${MUSICBRAINZ_API}/release-group`, {
       params: {
@@ -303,6 +488,10 @@ export async function resolveAlbumByArtistAndTitle({
   albumTitle = "",
   releaseYear = null,
 }) {
+  const pickStrongMatch = (candidates) =>
+    candidates.find(
+      (candidate) => candidate?.id && scoreTextMatch(candidate.title, albumTitle) >= 85,
+    );
   const firstPass = await searchAlbums(albumTitle, {
     artistName,
     limit: 10,
@@ -312,7 +501,8 @@ export async function resolveAlbumByArtistAndTitle({
     artistName,
     releaseYear,
   });
-  if (ranked[0]?.id) return ranked[0].id;
+  const firstMatch = pickStrongMatch(ranked);
+  if (firstMatch?.id) return firstMatch.id;
 
   const secondPass = await searchAlbums(albumTitle, {
     artistName: "",
@@ -323,7 +513,7 @@ export async function resolveAlbumByArtistAndTitle({
     artistName,
     releaseYear,
   });
-  return ranked[0]?.id || null;
+  return pickStrongMatch(ranked)?.id || null;
 }
 
 export async function listArtistAlbums(

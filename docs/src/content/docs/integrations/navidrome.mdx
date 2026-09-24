@@ -1,11 +1,47 @@
 ---
-title: Navidrome
-description: Connect Navidrome to play Aurral downloads and generated playlists.
+title: Navidrome and Subsonic
+description: Use Aurral's native Subsonic service or connect Navidrome for playback and playlists.
 ---
 
-Navidrome is optional. Aurral connects to Navidrome through its API and writes playlist files to the Aurral download tree. Navidrome must also be able to read that tree on disk.
+Navidrome is optional. Aurral can browse and play indexed media in the built-in player when the canonical file is readable. Aurral also exposes its own authenticated Subsonic service for compatible clients.
+
+Connect Navidrome when you want Navidrome's server, scanner, or ecosystem. Aurral creates and updates Navidrome playlists through the Subsonic API when Navidrome is configured. Navidrome must be able to read and scan the Aurral download tree for that destination.
 
 This is a filesystem connection as well as an API connection. A successful **Test connection** only proves that Aurral can reach the Navidrome API.
+
+Aurral also exposes an authenticated Subsonic server at `/rest/*.view`. It supports XML and JSON browsing, canonical artist, album, and song search, artwork, direct streaming with byte ranges, user-scoped favorites, and playlist changes through `createPlaylist`, `updatePlaylist`, and `deletePlaylist`. Flow entries and accessible shared-playlist entries are available through `getPlaylists` and `getPlaylist`. Navidrome remains optional for clients that connect directly to Aurral.
+
+When a Subsonic client adds a Flow or shared-playlist entry to a playlist, Aurral stores a reference to one canonical library acquisition job. The acquisition runs in the background. Multiple playlists that add the same track share that job. Removing a playlist entry removes only that playlist reference. It does not delete the canonical media file.
+
+Favoriting a Flow or shared-playlist entry uses the same canonical acquisition by default. To keep the favorite without acquiring the track, turn off **Favorite Flow tracks** in **Settings > System > Subsonic**. This setting does not change favorites for tracks that already exist in the canonical Library.
+
+## Connect a Subsonic client
+
+Point the client at the Aurral URL and use any local Aurral account. Aurral enables browser Subsonic clients on `/rest` without an additional CORS setting. Feishin can connect with its default token authentication. Feishin can also use password authentication when you set `LEGACY_AUTHENTICATION=true` in Feishin's environment. When Feishin locks server settings, set `SERVER_LOCK=true` in Feishin's environment.
+
+Subsonic token authentication uses the account's Aurral password. Accounts created before per-user Subsonic credentials were added need to sign in to Aurral once after upgrading, or have an administrator reset their password, before a token-only client can connect. Proxy- or OIDC-created accounts do not have a local Aurral password until an administrator sets one.
+
+Use the Aurral URL as the Feishin server URL. Set the server type to `Subsonic`. Feishin then shows canonical tracks, flow playlists, and shared playlists that the account can access. A playlist entry remains playable while its canonical file is readable.
+
+The native Subsonic responses include playlist artwork through `getPlaylists`, `getPlaylist`, and `getCoverArt`. They also expose genres from canonical artist, album, and track metadata through artist, album, song, and `getGenres` responses. The native path does not fetch metadata from a provider while browsing.
+
+## Submit play history
+
+Aurral reports `scrobble.view` submissions from Subsonic clients as local play events. The endpoint accepts repeated `id` and `time` parameters and follows the Subsonic `submission` flag. A successful submission records local history before Aurral delivers the play to any configured scrobbling provider.
+
+Aurral exposes `scrobblingEnabled=true` from `getuser.view`. This reports that the server supports the scrobble endpoint. It does not require a provider connection.
+
+The built-in Aurral player records completed library tracks through the same local play-event path. Aurral keeps local history when Last.fm, ListenBrainz, or Koito is unavailable.
+
+## Scrobbling without Navidrome
+
+Open **Settings > Playback > Scrobbling** to connect Last.fm or ListenBrainz. Aurral submits
+provider events directly, so a Navidrome connection is not required for scrobbling.
+
+Aurral uses the Last.fm API key and API secret from **Settings > Connect > Last.fm**. It validates
+ListenBrainz tokens directly. Completed plays are submitted from Aurral to the selected provider.
+
+Navidrome remains an independent playback and playlist destination. Aurral's built-in player and native Subsonic clients use the same local play history.
 
 See [Filesystem and mounts](/getting-started/storage/) for the complete layout. The recommended Docker setup mounts the same host media root at `/data` in Aurral and Navidrome:
 
@@ -23,21 +59,23 @@ volumes:
 ## Setup
 
 1. Mount the same media root in Aurral and Navidrome at the same container path.
-2. Set Aurral's **Settings > Download Clients > Downloads Folder > Path** to a folder under that path, for example `/data/downloads/aurral`.
+2. Set Aurral's **Settings > Download clients > Downloads Folder > Path** to a folder under that path, for example `/data/downloads/aurral`.
 3. Make sure Navidrome can read both `/data/music` and `/data/downloads/aurral` if you want to play reused Lidarr tracks as well as new Aurral downloads.
 4. Open **Settings > Playback > Navidrome** in Aurral.
 5. Enter the Navidrome URL, username, and password. Select **Test connection**, then save.
 6. Run a flow or update a playlist so Aurral can create or update the **Aurral Playlists** library and request a Navidrome scan.
 
-Aurral creates the **Aurral Playlists** library at:
+Aurral creates the **Aurral Playlists** library at the Downloads Folder root:
 
 ```text
-/data/downloads/aurral/aurral-weekly-flow
+/data/downloads/aurral
 ```
+
+Flow files live under `_flows`, which is visible to Navidrome scanners.
 
 You do not normally need to create this library manually in Navidrome. The library can be empty until a track finishes downloading. Wait for the scan after the first completed track.
 
-Navidrome must have permission to manage libraries through its API. If Aurral cannot create the library, use **Settings > System > Storage Health** for the exact path and error, then check the Navidrome account permissions and mount.
+Navidrome must have permission to manage libraries through its API. If Aurral cannot create the library, use **Settings > Storage health** for the exact path and error, then check the Navidrome account permissions and mount.
 
 ## Existing Lidarr library
 
@@ -45,56 +83,38 @@ Aurral does not copy your Lidarr library into the Aurral playlist folder. If a p
 
 Add `/data/music` as a normal Navidrome music library if it is not already present. The automatically managed **Aurral Playlists** library is for Aurral's generated download tree.
 
-## Different Navidrome paths
+## Filesystem paths
 
-Use matching container paths when possible. A different path affects two things:
+Aurral uses the Subsonic API for playlists, so it does not have a Navidrome playlist path-mapping setting. The automatically managed **Aurral Playlists** library must use the same absolute path in Aurral and Navidrome. Mount the shared download tree at matching paths in both applications.
 
-- the path Navidrome uses for its music library;
-- the paths written into Aurral's `.m3u` files.
+Reused Lidarr tracks do not need matching path strings because Aurral resolves indexed songs by their exact recording MBID. Generated tracks use the exact indexed Navidrome filepath or recording MBID; Aurral does not substitute a title match. Navidrome still needs its own library for those files. Use a separate [Remote Path Mapping](/getting-started/storage/#paths-reported-by-lidarr-or-download-clients) only when Aurral cannot read a path reported by Lidarr or a download client.
 
-The **Use Navidrome paths in M3U files** setting only changes the second item. It does not mount a folder and it does not make an incorrect Navidrome library path valid.
+## API playlists and scans
 
-If Aurral uses `/data/downloads/aurral` and Navidrome uses `/music/aurral` for the same host folder:
+Aurral stores the Navidrome playlist ID for each flow or shared playlist. Names are only display values, so a rename updates the same Navidrome playlist.
 
-1. Mount the same host folder in both containers.
-2. Make sure the Aurral playlist library exists in Navidrome at the path Navidrome can read. If automatic library creation used the Aurral path, correct the library path in Navidrome.
-3. In Aurral, open **Settings > Playback > Navidrome**.
-4. Enable **Use Navidrome paths in M3U files**.
-5. Add this mapping:
+Aurral-managed Navidrome playlists are made public when they are created. Later syncs update their name and tracks without changing visibility, so you can make a playlist private in Navidrome and keep it private. Playlist changes remain owned by the configured Navidrome account.
 
-   | | Value |
-   | --- | --- |
-   | Aurral Path | `/data/downloads/aurral` |
-   | Navidrome Path | `/music/aurral` |
+Aurral also uploads its generated playlist artwork to API playlists and updates it when you change or regenerate artwork in Aurral. Aurral revalidates its local artwork response after restart, so the image stays current in the Aurral UI. Navidrome uses that uploaded image instead of its automatic tiled artwork when custom playlist artwork is supported.
 
-6. After the settings save automatically, refresh the affected playlist. Run the flow again, or edit and save a shared playlist, to rewrite its `.m3u` file.
+If Navidrome is unavailable during a playlist update, Aurral keeps the stored playlist ID and queues the snapshot for its existing catch-up attempts.
 
-For a native Windows Navidrome installation, use the Windows path as **Navidrome Path**, for example `N:/ServerFolders/Music/Aurral`. Use a separate [Remote Path Mapping](/getting-started/storage/#paths-reported-by-lidarr-or-download-clients) if Aurral cannot read paths reported by Lidarr or a download client.
+If a new track is not indexed, Aurral leaves it out until Navidrome scans it; it never substitutes a same-title track from another artist. Navidrome scans the **Aurral Playlists** library, not only your main Lidarr library. If the library appears but has no tracks:
 
-## Generated playlists and scans
-
-Aurral stores generated `.m3u` files under:
-
-```text
-/data/downloads/aurral/aurral-weekly-flow/_playlists/
-```
-
-Navidrome scans the **Aurral Playlists** library, not only your main Lidarr library. If the library appears but has no tracks:
-
-- confirm that a track exists under `aurral-weekly-flow`;
+- confirm that a permanent track exists under the Downloads Folder or a flow track exists under `_flows`;
 - confirm that the Navidrome library path points to that folder;
 - run a Navidrome scan or save the Aurral Navidrome settings;
 - wait for the scan to finish.
 
 ## Remove missing tracks
 
-For Weekly Flow, set this Navidrome environment variable:
+For Navidrome, set this environment variable if you want it to remove old files:
 
 ```bash
 ND_SCANNER_PURGEMISSING=always
 ```
 
-This removes old flow entries after a flow changes.
+This removes any missing Navidrome files, including flow entries, after a scan.
 
 :::caution
 `ND_SCANNER_PURGEMISSING=always` also removes other missing Navidrome files. It can remove their ratings, play counts, and playlist entries. Use it only when missing files will not return.

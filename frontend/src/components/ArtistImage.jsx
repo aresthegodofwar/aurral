@@ -1,9 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { getArtistCover } from "../utils/api/endpoints/artists.js";
-import { normalizeMediaUrl } from "../utils/normalizeMediaUrl";
+import { normalizeMediaUrl, withImageCacheBust } from "../utils/normalizeMediaUrl";
 import { useArtistPreviewPlayback } from "../hooks/useArtistPreviewPlayback";
 
-import { Music, Loader, Play } from "lucide-react";
+import { Music, Play } from "lucide-react";
+import { DotLoader } from "./DotLoader";
+import Tooltip from "./Tooltip";
 const queue = [];
 let active = 0;
 const MAX_CONCURRENT = 4;
@@ -59,9 +61,15 @@ const ArtistImage = ({
   const [currentSrc, setCurrentSrc] = useState(() => normalizeMediaUrl(src));
   const [isLoading, setIsLoading] = useState(true);
   const [hasError, setHasError] = useState(false);
+  const [fallbackVisible, setFallbackVisible] = useState(
+    () => typeof IntersectionObserver === "undefined",
+  );
   const fetchingRef = useRef(false);
   const triedBackendFallbackRef = useRef(false);
+  const failedSourceRef = useRef(null);
+  const visibleMbidRef = useRef(fallbackVisible ? mbid : null);
   const imgRef = useRef(null);
+  const fallbackTargetRef = useRef(null);
   const abortRef = useRef(null);
   const { canPlayArtistPreview, isArtistPreviewActive, isLoadingPreview, playArtistPreview } =
     useArtistPreviewPlayback({
@@ -101,7 +109,11 @@ const ArtistImage = ({
           const front = data.images.find((img) => img.front) || data.images[0];
           const url = front.image;
           if (url) {
-            setCurrentSrc(normalizeMediaUrl(url));
+            const retryUrl =
+              refresh && failedSourceRef.current === normalizeMediaUrl(url)
+                ? withImageCacheBust(url)
+                : url;
+            setCurrentSrc(normalizeMediaUrl(retryUrl));
             setHasError(false);
           } else {
             setHasError(true);
@@ -123,22 +135,59 @@ const ArtistImage = ({
   );
 
   useEffect(() => {
-    fetchingRef.current = false;
+    const visible = typeof IntersectionObserver === "undefined";
+    failedSourceRef.current = null;
     triedBackendFallbackRef.current = false;
+    visibleMbidRef.current = visible ? mbid : null;
+    setFallbackVisible(visible);
+  }, [mbid, src]);
+
+  useEffect(() => {
+    if (currentSrc || !mbid || !enableBackendFallback) return;
+    if (typeof IntersectionObserver === "undefined") {
+      setFallbackVisible(true);
+      return;
+    }
+
+    const target = fallbackTargetRef.current;
+    if (!target) return;
+
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (!entry?.isIntersecting) return;
+        visibleMbidRef.current = mbid;
+        setFallbackVisible(true);
+        observer.disconnect();
+      },
+      { rootMargin: "200px" },
+    );
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [currentSrc, enableBackendFallback, mbid, src]);
+
+  useEffect(() => {
+    fetchingRef.current = false;
 
     if (abortRef.current) abortRef.current.abort();
     const controller = new AbortController();
     abortRef.current = controller;
 
-    if (src) {
-      setCurrentSrc(normalizeMediaUrl(src));
+    const normalizedSrc = normalizeMediaUrl(src);
+    const sourceFailed = normalizedSrc && failedSourceRef.current === normalizedSrc;
+    if (normalizedSrc && !sourceFailed) {
+      setCurrentSrc(normalizedSrc);
       setHasError(false);
       setIsLoading(true);
-    } else if (mbid && enableBackendFallback) {
+    } else if (
+      mbid &&
+      enableBackendFallback &&
+      fallbackVisible &&
+      visibleMbidRef.current === mbid
+    ) {
       setCurrentSrc(null);
       setHasError(false);
       setIsLoading(true);
-      fetchBackendCover(mbid, artistName, controller.signal);
+      fetchBackendCover(mbid, artistName, controller.signal, Boolean(sourceFailed));
     } else {
       setCurrentSrc(null);
       setIsLoading(false);
@@ -146,7 +195,7 @@ const ArtistImage = ({
     }
 
     return () => controller.abort();
-  }, [src, mbid, artistName, fetchBackendCover, enableBackendFallback]);
+  }, [src, mbid, artistName, fetchBackendCover, enableBackendFallback, fallbackVisible]);
 
   useEffect(() => {
     const image = imgRef.current;
@@ -187,9 +236,15 @@ const ArtistImage = ({
   const handleError = () => {
     if (enableBackendFallback && mbid && !triedBackendFallbackRef.current) {
       triedBackendFallbackRef.current = true;
-      setIsLoading(true);
+      failedSourceRef.current = currentSrc;
+      setCurrentSrc(null);
       setHasError(false);
-      fetchBackendCover(mbid, artistName, abortRef.current?.signal, true);
+      if (fallbackVisible && visibleMbidRef.current === mbid) {
+        setIsLoading(true);
+        fetchBackendCover(mbid, artistName, abortRef.current?.signal, true);
+      } else {
+        setIsLoading(false);
+      }
       return;
     }
     setHasError(true);
@@ -203,22 +258,23 @@ const ArtistImage = ({
   };
 
   const previewButton = canPlayArtistPreview ? (
-    <span
-      role="button"
-      tabIndex={isLoadingPreview ? -1 : 0}
-      className={`artist-image-preview-button${isArtistPreviewActive ? " is-active" : ""}${isLoadingPreview ? " is-loading" : ""}`}
-      onClick={handlePreviewClick}
-      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); playArtistPreview(); } }}
-      aria-disabled={isLoadingPreview}
-      aria-label={`Play ${artistName || "artist"} top tracks`}
-      title={`Play ${artistName || "artist"} top tracks`}
-    >
-      {isLoadingPreview ? (
-        <Loader className="artist-image-preview-button__icon animate-spin" />
-      ) : (
-        <Play className="artist-image-preview-button__icon" fill="currentColor" />
-      )}
-    </span>
+    <Tooltip content={`Play ${artistName || "artist"} top tracks`}>
+      <span
+        role="button"
+        tabIndex={isLoadingPreview ? -1 : 0}
+        className={`artist-image-preview-button${isArtistPreviewActive ? " is-active" : ""}${isLoadingPreview ? " is-loading" : ""}`}
+        onClick={handlePreviewClick}
+        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); playArtistPreview(); } }}
+        aria-disabled={isLoadingPreview}
+        aria-label={`Play ${artistName || "artist"} top tracks`}
+      >
+        {isLoadingPreview ? (
+          <DotLoader size="md" label={null} className="artist-image-preview-button__icon" />
+        ) : (
+          <Play className="artist-image-preview-button__icon" fill="currentColor" />
+        )}
+      </span>
+    </Tooltip>
   ) : null;
 
   const showPlaceholder = !currentSrc;
@@ -235,6 +291,7 @@ const ArtistImage = ({
   if (showPlaceholder) {
     return (
       <div
+        ref={fallbackTargetRef}
         className={`artist-image-root ${className}`}
         style={{
           background: "var(--aurral-surface-raised)",
@@ -242,15 +299,16 @@ const ArtistImage = ({
       >
         <div className="artist-image-overlay">
           {isLoading ? (
-            <Loader
-              className={`artist-image-loader${showLoading ? " animate-spin" : " is-dim"}`}
+            <DotLoader
+              size="md"
+              label={null}
+              className={`artist-image-loader${showLoading ? "" : " is-dim"}`}
             />
           ) : (
             <Music className="artist-image-icon" />
           )}
         </div>
         {previewButton}
-        {isLoading && <div className="artist-image-shimmer" />}
       </div>
     );
   }
@@ -265,7 +323,7 @@ const ArtistImage = ({
           className="artist-image-overlay"
           style={{ backgroundColor: "var(--aurral-surface-raised)" }}
         >
-          <Loader className="artist-image-loader animate-spin" />
+          <DotLoader size="md" label={null} className="artist-image-loader" />
         </div>
       )}
       {currentSrc && (

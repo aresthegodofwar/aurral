@@ -5,7 +5,9 @@ import { TAG_COLORS } from "../../discoverUtils";
 import { getTagColor } from "../../ArtistDetails/utils";
 import { useDebouncedTask } from "../../../hooks/useDebouncedTask";
 
-import { Loader2, Search } from "lucide-react";
+import { Search } from "lucide-react";
+import { DotLoader } from "../../../components/DotLoader";
+import Tooltip from "../../../components/Tooltip";
 const SOURCE_MIX_COLORS = {
   discover: TAG_COLORS[10],
   mix: TAG_COLORS[4],
@@ -239,23 +241,23 @@ export function MixSlider({
             const disabledReason = disabledSources?.[option.key];
             const isDisabled = Boolean(disabledReason) || isOnlyActive;
             return (
-              <button
-                key={option.key}
-                type="button"
-                onClick={() =>
-                  !disabledReason &&
-                  onChange(toggleSourceInMix(normalized, option.key, normalizeMixPercent))
-                }
-                disabled={isDisabled}
-                className={`flow-page__mix-toggle${isActive ? " is-active" : ""}${isDisabled ? " is-disabled" : ""}`}
-                aria-pressed={isActive}
-                title={disabledReason || undefined}
-              >
-                <span>{option.label}</span>
-                <span className="flow-page__mix-toggle-state">
-                  {disabledReason ? "Needs Last.fm" : isActive ? "On" : "Off"}
-                </span>
-              </button>
+              <Tooltip key={option.key} content={disabledReason || undefined}>
+                <button
+                  type="button"
+                  onClick={() =>
+                    !disabledReason &&
+                    onChange(toggleSourceInMix(normalized, option.key, normalizeMixPercent))
+                  }
+                  disabled={isDisabled}
+                  className={`flow-page__mix-toggle${isActive ? " is-active" : ""}${isDisabled ? " is-disabled" : ""}`}
+                  aria-pressed={isActive}
+                >
+                  <span>{option.label}</span>
+                  <span className="flow-page__mix-toggle-state">
+                    {disabledReason ? "Needs Last.fm" : isActive ? "On" : "Off"}
+                  </span>
+                </button>
+              </Tooltip>
             );
           })}
         </div>
@@ -600,7 +602,7 @@ export function CommaTokenInput({
         >
           {loadingSuggestions && suggestions.length === 0 ? (
             <div className="flow-page__token-suggestion flow-page__token-suggestion--loading">
-              <Loader2 className="artist-icon-sm animate-spin" />
+              <DotLoader size="sm" label={null} />
               Searching
             </div>
           ) : null}

@@ -11,11 +11,11 @@ max_embed_chars=6000
 max_embed_fields=25
 
 case "${channel}" in
-  releases|nightly|previews)
+  releases|nightly)
     webhook_url="${DISCORD_WEBHOOK_ANNOUNCEMENTS:-}"
     ;;
   *)
-    echo "Usage: $0 releases|nightly|previews" >&2
+    echo "Usage: $0 releases|nightly" >&2
     exit 2
     ;;
 esac
@@ -175,28 +175,6 @@ previous_stable_tag() {
   fi
 }
 
-pr_summary_excerpt() {
-  local pr_number="$1"
-  local body
-  body="$(gh api "repos/${repository}/pulls/${pr_number}" --jq '.body // ""')"
-  body="$(printf '%s\n' "${body}" | sed -e 's/\r$//' -e '/^<!--/,/-->$/d')"
-  if printf '%s\n' "${body}" | grep -q '^## Summary'; then
-    body="$(printf '%s\n' "${body}" | awk '
-      BEGIN { take=0 }
-      /^## Summary/ { take=1; next }
-      /^## / { if (take) exit }
-      take { print }
-    ')"
-  fi
-  body="$(printf '%s\n' "${body}" | sed '/./,$!d' | head -n 8)"
-  body="$(printf '%s\n' "${body}" | sed 's/[[:space:]]*$//')"
-  if [ -z "${body}" ]; then
-    printf '%s' "No summary provided on the pull request."
-    return 0
-  fi
-  truncate_text "${body}" 500
-}
-
 embed_fields_json='[]'
 embed_field_chars=0
 embed_field_count=0
@@ -234,20 +212,20 @@ case "${channel}" in
   releases)
     release_version="${RELEASE_VERSION:?RELEASE_VERSION is required}"
     release_tag="${RELEASE_TAG:?RELEASE_TAG is required}"
-    head_sha="${HEAD_SHA:-${GITHUB_SHA:-}}"
     title="Aurral ${release_version} is out!"
     url="https://github.com/${repository}/releases/tag/${release_tag}"
     description="$(cat <<EOF
+**Install with Docker**
+
 \`docker pull ghcr.io/${repository}:${release_version}\`
 \`docker pull ghcr.io/${repository}:latest\`
 EOF
 )"
-    if [ -n "${head_sha}" ]; then
-      base_tag="$(previous_stable_tag "${release_tag}")"
-      pull_list="$(collect_merged_pull_lines "${head_sha}" "${base_tag}")"
-      issue_list="$(collect_closing_issue_lines_for_pulls "${pull_list}")"
-      add_bullet_fields "${pull_list}" "None recorded for this release." "Included"
-      add_bullet_fields "${issue_list}" "None" "Linked issues"
+    release_notes_file="release-notes/${release_version}.md"
+    if [ -s "${release_notes_file}" ]; then
+      description+=$'\n\n'"$(cat "${release_notes_file}")"
+    else
+      description+=$'\n\n'"[Read the release notes on GitHub](https://github.com/${repository}/releases/tag/${release_tag})."
     fi
     ;;
   nightly)
@@ -272,44 +250,6 @@ EOF
     fi
     add_bullet_fields "${pull_list}" "No merged pull requests in this range." "Included"
     add_bullet_fields "${issue_list}" "None" "Linked issues"
-    ;;
-  previews)
-    pr_number="${PR_NUMBER:?PR_NUMBER is required}"
-    pr_title="${PR_TITLE:?PR_TITLE is required}"
-    image_tag="${IMAGE_TAG:?IMAGE_TAG is required}"
-    title="A new preview is ready to test!"
-    url="https://github.com/${repository}/pull/${pr_number}"
-    description="$(cat <<EOF
-**${pr_title}**
-
-\`docker pull ghcr.io/${repository}:${image_tag}\`
-
-Please test it and share feedback in #testing.
-EOF
-)"
-    add_field "What changed" "$(pr_summary_excerpt "${pr_number}")"
-    closing_issues=""
-    while IFS= read -r issue_number; do
-      [ -z "${issue_number}" ] && continue
-      issue_line="$(gh api \
-        "repos/${repository}/issues/${issue_number}" \
-        --jq '"- [#\(.number)](\(.html_url)) \(.title)"')"
-      closing_issues+="${issue_line}"$'\n'
-    done <<< "$(gh api graphql \
-      -f query='query($owner: String!, $repo: String!, $number: Int!) {
-        repository(owner: $owner, name: $repo) {
-          pullRequest(number: $number) {
-            closingIssuesReferences(first: 100) {
-              nodes { number }
-            }
-          }
-        }
-      }' \
-      -f "owner=${owner}" \
-      -f "repo=${repo}" \
-      -F "number=${pr_number}" \
-      --jq '.data.repository.pullRequest.closingIssuesReferences.nodes[]?.number')"
-    add_bullet_fields "${closing_issues%$'\n'}" "None linked yet" "Linked issues"
     ;;
 esac
 

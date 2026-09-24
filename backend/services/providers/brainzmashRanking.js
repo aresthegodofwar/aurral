@@ -1,6 +1,32 @@
-function normalizeText(value) {
+const UNDECOMPOSED_LETTERS = {
+  ø: "o",
+  Ø: "O",
+  æ: "ae",
+  Æ: "AE",
+  œ: "oe",
+  Œ: "OE",
+  đ: "d",
+  Đ: "D",
+  ð: "d",
+  Ð: "D",
+  ł: "l",
+  Ł: "L",
+  þ: "th",
+  Þ: "TH",
+  ß: "ss",
+  ẞ: "SS",
+};
+
+export function foldDiacritics(value) {
   return String(value || "")
-    .normalize("NFKD")
+    .normalize("NFD")
+    .replace(/(\p{Script=Latin})\p{M}+/gu, "$1")
+    .normalize("NFC")
+    .replace(/[øØæÆœŒđĐðÐłŁþÞßẞ]/g, (letter) => UNDECOMPOSED_LETTERS[letter]);
+}
+
+function normalizeText(value) {
+  return foldDiacritics(String(value || "").normalize("NFKD"))
     .toLowerCase()
     .replace(/[^\p{L}\p{N}]+/gu, " ")
     .replace(/\s+/g, " ")
@@ -36,7 +62,7 @@ const MATCHER_STRIP =
   /\b(deluxe|expanded|anniversary|remaster(?:ed)?|bonus|edition|live|mono|stereo|single|ep|explicit|clean)\b/g;
 
 export function normalizeReleaseText(value, { extended = false } = {}) {
-  return String(value || "")
+  return foldDiacritics(value)
     .toLowerCase()
     .replace(/&/g, " and ")
     .replace(/\(.*?\)|\[.*?\]/g, " ")
@@ -125,18 +151,19 @@ export function pickResolvedDurationMs({
 } = {}) {
   let duration = positiveMs(playlistDurationMs);
   const lastfm = positiveMs(lastfmDurationMs);
+  const matched = positiveMs(matchedTrackDurationMs);
+  const lastfmAlbumMatches =
+    Boolean(albumName) &&
+    Boolean(lastfmAlbumName) &&
+    scoreTextMatch(lastfmAlbumName, albumName, { extended: true }) >= 85;
   if (lastfm) {
     if (!duration) {
       duration = lastfm;
-    } else if (
-      albumName &&
-      lastfmAlbumName &&
-      scoreTextMatch(lastfmAlbumName, albumName, { extended: true }) >= 85
-    ) {
+    } else if (lastfmAlbumMatches) {
       duration = lastfm;
     }
   }
-  return duration || positiveMs(matchedTrackDurationMs);
+  return matched && !lastfmAlbumMatches ? matched : duration || matched;
 }
 
 export function getYear(value) {

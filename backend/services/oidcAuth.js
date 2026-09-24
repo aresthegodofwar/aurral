@@ -171,6 +171,22 @@ export function resolveOidcUsername(claims = {}) {
   return "";
 }
 
+async function fetchEffectiveClaims(oidc, tokens, claims) {
+  if (!claims.sub || !tokens.access_token) return claims;
+
+  try {
+    const userInfo = await client.fetchUserInfo(oidc, tokens.access_token, claims.sub);
+    const effectiveClaims = { ...claims, ...userInfo };
+    const groupsClaim = getGroupsClaim();
+    if (groupsClaim) {
+      effectiveClaims[groupsClaim] = claims[groupsClaim];
+    }
+    return effectiveClaims;
+  } catch {
+    return claims;
+  }
+}
+
 async function getDiscoveryConfig() {
   const config = getRequiredConfig();
   if (!config) {
@@ -191,17 +207,6 @@ async function getDiscoveryConfig() {
   );
   discoveryKey = key;
   return { config, oidc: discoveryConfig };
-}
-
-async function fetchEffectiveClaims(oidc, tokens, claims) {
-  const subject = claims.sub;
-  if (!subject || !tokens.access_token) return claims;
-  try {
-    const userInfo = await client.fetchUserInfo(oidc, tokens.access_token, subject);
-    return { ...claims, ...userInfo };
-  } catch {
-    return claims;
-  }
 }
 
 function toDisplayName(claims) {
@@ -366,8 +371,8 @@ export async function handleOidcCallback(req) {
     idTokenExpected: true,
   });
 
-  const claims = tokens.claims() || {};
-  const user = resolveOidcSessionUser(config, await fetchEffectiveClaims(oidc, tokens, claims));
+  const claims = await fetchEffectiveClaims(oidc, tokens, tokens.claims() || {});
+  const user = resolveOidcSessionUser(config, claims);
 
   const code = client.randomState();
   prunePendingExchanges();

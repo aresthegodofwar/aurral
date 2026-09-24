@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { Newspaper, RefreshCw } from "lucide-react";
+import { Newspaper } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
 import { useDocumentTitle } from "../hooks/useDocumentTitle";
 import { useLibraryNews } from "../hooks/useLibraryNews";
 import { NewsArticleCard } from "../components/NewsArticleCard";
+import { DotLoader } from "../components/DotLoader";
 
 export default function NewsPage() {
   useDocumentTitle("Artist News");
@@ -46,9 +47,6 @@ export default function NewsPage() {
       <header className="discover-news-page__header">
         <div>
           <h1 className="page-title">Artist News</h1>
-          <p className="discover-news-page__subtitle">
-            Top stories from your enabled RSS feeds
-          </p>
         </div>
         {newsConfigured ? (
           <button
@@ -73,9 +71,8 @@ export default function NewsPage() {
         </section>
       ) : loading && articles.length === 0 ? (
         <section className="discover-news-page__status">
-          <RefreshCw className="animate-spin" aria-hidden="true" />
+          <DotLoader size="2xl" label={null} />
           <h2>Loading artist news</h2>
-          <p>Checking recent stories for your library artists.</p>
         </section>
       ) : articles.length > 0 ? (
         <>
@@ -102,7 +99,7 @@ export default function NewsPage() {
           ) : null}
           {hasMore ? (
             <div ref={loadMoreRef} className="discover-news-page__load-more" aria-live="polite">
-              {loadingMore ? "Loading more stories…" : "Loading more stories…"}
+              {loadingMore ? <DotLoader size="sm" label={null} /> : "Loading more stories…"}
             </div>
           ) : null}
         </>

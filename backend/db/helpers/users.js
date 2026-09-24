@@ -1,4 +1,6 @@
 import { db, dbHelpers } from "../../config/db-sqlite.js";
+import { decryptWithKey, encryptWithKey } from "../../config/encryption.js";
+import { getSettingsEncryptionKey } from "./settings.js";
 import {
   DEFAULT_LISTEN_HISTORY_PROVIDER,
   getListenHistoryProfile,
@@ -11,18 +13,24 @@ const getUserByUsernameStmt = db.prepare(
   "SELECT * FROM users WHERE username = ?"
 );
 const getAllUsersStmt = db.prepare(
-  "SELECT id, username, role, permissions, lastfm_username, listen_history_provider, listen_history_username, listen_history_url, lidarr_root_folder_path, lidarr_quality_profile_id, status, is_protected, role_source, has_local_password, needs_identity_migration, allow_identity_adoption FROM users ORDER BY username"
+  "SELECT id, username, role, permissions, lastfm_username, listen_history_provider, listen_history_username, listen_history_url, lidarr_root_folder_path, lidarr_quality_profile_id, status, is_protected, role_source, has_local_password, needs_identity_migration, allow_identity_adoption, default_library_owner FROM users ORDER BY username"
 );
 const getUserByIdStmt = db.prepare("SELECT * FROM users WHERE id = ?");
 const getUserAuthByIdStmt = db.prepare(
-  "SELECT id, username, role, permissions, status, is_protected, role_source FROM users WHERE id = ?"
+  "SELECT id, username, role, permissions, status, is_protected, role_source, default_library_owner FROM users WHERE id = ?"
 );
 const countUsersStmt = db.prepare("SELECT COUNT(*) AS count FROM users");
 const insertUserStmt = db.prepare(
-  "INSERT INTO users (username, password_hash, role, permissions, lidarr_root_folder_path, lidarr_quality_profile_id, has_local_password, is_protected) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+  "INSERT INTO users (username, password_hash, subsonic_password, role, permissions, lidarr_root_folder_path, lidarr_quality_profile_id, has_local_password, is_protected) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
 );
 const updateUserStmt = db.prepare(
-  "UPDATE users SET username = ?, password_hash = ?, role = ?, permissions = ?, lastfm_username = ?, listen_history_provider = ?, listen_history_username = ?, listen_history_url = ?, lidarr_root_folder_path = ?, lidarr_quality_profile_id = ?, status = ?, role_source = ?, has_local_password = ?, needs_identity_migration = ?, allow_identity_adoption = ? WHERE id = ?"
+  "UPDATE users SET username = ?, password_hash = ?, subsonic_password = ?, role = ?, permissions = ?, lastfm_username = ?, listen_history_provider = ?, listen_history_username = ?, listen_history_url = ?, lidarr_root_folder_path = ?, lidarr_quality_profile_id = ?, status = ?, role_source = ?, has_local_password = ?, needs_identity_migration = ?, allow_identity_adoption = ?, default_library_owner = ? WHERE id = ?"
+);
+const getSubsonicPasswordByIdStmt = db.prepare(
+  "SELECT subsonic_password FROM users WHERE id = ?",
+);
+const updateSubsonicPasswordStmt = db.prepare(
+  "UPDATE users SET subsonic_password = ? WHERE id = ?",
 );
 const setProtectedStmt = db.prepare("UPDATE users SET is_protected = ? WHERE id = ?");
 const deleteUserStmt = db.prepare("DELETE FROM users WHERE id = ?");
@@ -37,7 +45,25 @@ const DEFAULT_PERMISSIONS = {
   changeMonitoring: false,
   deleteArtist: false,
   deleteAlbum: false,
+  deleteTrack: false,
 };
+
+function normalizeDefaultLibraryOwner(value) {
+  if (value === null || value === "") return null;
+  const normalized = String(value || "").trim().toLowerCase();
+  return normalized === "aurral" || normalized === "lidarr" ? normalized : null;
+}
+
+function encryptSubsonicPassword(password) {
+  const value = password == null ? "" : String(password);
+  return value ? encryptWithKey(value, getSettingsEncryptionKey()) : null;
+}
+
+function decryptSubsonicPassword(value) {
+  if (!value) return null;
+  const decrypted = decryptWithKey(value, getSettingsEncryptionKey());
+  return decrypted || null;
+}
 
 export const userOps = {
   getDefaultPermissions() {
@@ -68,6 +94,7 @@ export const userOps = {
       hasLocalPassword: !!row.has_local_password,
       needsIdentityMigration: !!row.needs_identity_migration,
       allowIdentityAdoption: !!row.allow_identity_adoption,
+      defaultLibraryOwner: normalizeDefaultLibraryOwner(row.default_library_owner),
       ...history,
     };
   },
@@ -94,6 +121,7 @@ export const userOps = {
       hasLocalPassword: !!row.has_local_password,
       needsIdentityMigration: !!row.needs_identity_migration,
       allowIdentityAdoption: !!row.allow_identity_adoption,
+      defaultLibraryOwner: normalizeDefaultLibraryOwner(row.default_library_owner),
       ...history,
     };
   },
@@ -110,7 +138,22 @@ export const userOps = {
       status: row.status || "active",
       isProtected: !!row.is_protected,
       roleSource: row.role_source || "local",
+      defaultLibraryOwner: normalizeDefaultLibraryOwner(row.default_library_owner),
     };
+  },
+  getSubsonicPasswordById(id) {
+    const row = getSubsonicPasswordByIdStmt.get(parseInt(id, 10));
+    return decryptSubsonicPassword(row?.subsonic_password);
+  },
+  syncSubsonicPassword(id, password) {
+    const userId = parseInt(id, 10);
+    const row = getSubsonicPasswordByIdStmt.get(userId);
+    if (!row) return false;
+    const current = decryptSubsonicPassword(row.subsonic_password);
+    const next = password == null ? "" : String(password);
+    if (current === (next || null)) return false;
+    updateSubsonicPasswordStmt.run(encryptSubsonicPassword(next), userId);
+    return true;
   },
   countUsers() {
     return countUsersStmt.get().count;
@@ -136,6 +179,7 @@ export const userOps = {
       hasLocalPassword: !!r.has_local_password,
       needsIdentityMigration: !!r.needs_identity_migration,
       allowIdentityAdoption: !!r.allow_identity_adoption,
+      defaultLibraryOwner: normalizeDefaultLibraryOwner(r.default_library_owner),
     }));
   },
   createUser(
@@ -145,6 +189,7 @@ export const userOps = {
     permissions = null,
     hasLocalPassword = true,
     isProtected = false,
+    subsonicPassword = null,
   ) {
     const un = String(username).trim();
     if (!un) return null;
@@ -155,6 +200,7 @@ export const userOps = {
       const result = insertUserStmt.run(
         un.toLowerCase(),
         passwordHash,
+        encryptSubsonicPassword(subsonicPassword),
         role,
         dbHelpers.stringifyJSON(perms),
         null,
@@ -179,6 +225,7 @@ export const userOps = {
         hasLocalPassword: !!hasLocalPassword,
         needsIdentityMigration: false,
         allowIdentityAdoption: false,
+        defaultLibraryOwner: null,
       };
     } catch (e) {
       return null;
@@ -186,7 +233,8 @@ export const userOps = {
   },
   updateUser(id, data) {
     const existing = userOps.getUserById(id);
-    if (!existing) return null;
+    const existingRow = getUserByIdStmt.get(parseInt(id, 10));
+    if (!existing || !existingRow) return null;
     const username =
       data.username !== undefined
         ? String(data.username).trim()
@@ -195,6 +243,14 @@ export const userOps = {
       data.passwordHash !== undefined
         ? data.passwordHash
         : existing.passwordHash;
+    const passwordHashChanged =
+      data.passwordHash !== undefined && data.passwordHash !== existing.passwordHash;
+    const subsonicPassword =
+      data.subsonicPassword !== undefined
+        ? encryptSubsonicPassword(data.subsonicPassword)
+        : passwordHashChanged
+          ? null
+          : existingRow.subsonic_password || null;
     const role = data.role !== undefined ? data.role : existing.role;
     const permissions =
       data.permissions !== undefined
@@ -220,7 +276,7 @@ export const userOps = {
         : existing.listenHistoryUrl,
     );
     const resolvedUsername =
-      listenHistoryProvider === "koito" ? null : listenHistoryUsername;
+      ["koito", "local"].includes(listenHistoryProvider) ? null : listenHistoryUsername;
     const resolvedUrl =
       listenHistoryProvider === "koito" ? listenHistoryUrl : null;
     const lastfmUsername =
@@ -257,10 +313,15 @@ export const userOps = {
       data.allowIdentityAdoption !== undefined
         ? !!data.allowIdentityAdoption
         : existing.allowIdentityAdoption;
+    const defaultLibraryOwner =
+      data.defaultLibraryOwner !== undefined
+        ? normalizeDefaultLibraryOwner(data.defaultLibraryOwner)
+        : normalizeDefaultLibraryOwner(existing.defaultLibraryOwner);
     try {
       updateUserStmt.run(
         username.toLowerCase(),
         passwordHash,
+        subsonicPassword,
         role,
         dbHelpers.stringifyJSON(permissions),
         lastfmUsername,
@@ -274,6 +335,7 @@ export const userOps = {
         hasLocalPassword ? 1 : 0,
         needsIdentityMigration ? 1 : 0,
         allowIdentityAdoption ? 1 : 0,
+        defaultLibraryOwner,
         parseInt(id, 10)
       );
       return {
@@ -293,6 +355,7 @@ export const userOps = {
         hasLocalPassword,
         needsIdentityMigration,
         allowIdentityAdoption,
+        defaultLibraryOwner,
       };
     } catch (e) {
       return null;

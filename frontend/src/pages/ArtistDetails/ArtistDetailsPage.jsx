@@ -1,13 +1,17 @@
 import { useCallback, useId, useMemo, useRef, useState } from "react";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   getArtistCover,
   getArtistDetails,
-  getArtistOverrides,
+  fetchArtistOverrides,
   getArtistPreview,
   getSimilarArtistsForArtist,
   updateArtistOverrides,
 } from "../../utils/api/endpoints/artists.js";
-import { addArtistToLibrary } from "../../utils/api/endpoints/library.js";
+import {
+  addArtistToLibrary,
+  downloadTrackToLibrary,
+} from "../../utils/api/endpoints/library.js";
 import {
   addSharedPlaylistTracks,
   createSharedPlaylist,
@@ -22,7 +26,8 @@ import { useSharedPlaylists } from "../../hooks/useSharedPlaylists";
 
 import { useParams, useLocation } from "react-router-dom";
 import { useDiscoverNavigation } from "../../hooks/useDiscoverNavigation";
-import { Loader, Music, X } from "lucide-react";
+import { Music, X } from "lucide-react";
+import { DotLoader } from "../../components/DotLoader";
 import { useToast } from "../../contexts/ToastContext";
 import { useAuth } from "../../contexts/AuthContext";
 import { useDocumentTitle } from "../../hooks/useDocumentTitle";
@@ -44,6 +49,8 @@ import { ArtistDetailsSimilar } from "./components/ArtistDetailsSimilar";
 import { DeleteArtistModal } from "./components/DeleteArtistModal";
 import { DeleteAlbumModal } from "./components/DeleteAlbumModal";
 import { AddArtistCustomizeModal } from "./components/AddArtistCustomizeModal";
+import { queryClient, queryKeys } from "../../queryClient.js";
+import TooltipButton from "../../components/TooltipButton";
 const MBID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function ArtistDetailsPage() {
@@ -63,8 +70,6 @@ function ArtistDetailsPage() {
   const { hasPermission } = useAuth();
   const similarArtistsScrollRef = useRef(null);
   const [showEditIdsModal, setShowEditIdsModal] = useState(false);
-  const [idsLoading, setIdsLoading] = useState(false);
-  const [idsSaving, setIdsSaving] = useState(false);
   const [idsError, setIdsError] = useState("");
   const [idsValues, setIdsValues] = useState({
     musicbrainzId: "",
@@ -79,9 +84,30 @@ function ArtistDetailsPage() {
     loadSharedPlaylists,
   } = useSharedPlaylists();
   const [playlistMenuSavingKey, setPlaylistMenuSavingKey] = useState("");
+  const [libraryTrackSavingKeys, setLibraryTrackSavingKeys] = useState(() => new Set());
   const [visibleReleaseGroupCoverIds, setVisibleReleaseGroupCoverIds] = useState([]);
   const [visibleAppearsOnCoverIds, setVisibleAppearsOnCoverIds] = useState([]);
   const [visibleLibraryCoverIds, setVisibleLibraryCoverIds] = useState([]);
+
+  const artistOverridesQuery = useQuery({
+    queryKey: queryKeys.artistOverrides(mbid),
+    queryFn: ({ signal }) => fetchArtistOverrides(mbid, { signal }),
+    enabled: false,
+    staleTime: 30_000,
+  });
+  const saveArtistOverridesMutation = useMutation({
+    mutationFn: ({ artistMbid, values }) => updateArtistOverrides(artistMbid, values),
+  });
+  const addSimilarArtistMutation = useMutation({
+    mutationFn: addArtistToLibrary,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.libraryCanonicalPrefix }),
+  });
+  const downloadTrackMutation = useMutation({ mutationFn: downloadTrackToLibrary });
+  const { mutateAsync: saveArtistOverrides } = saveArtistOverridesMutation;
+  const { mutateAsync: addSimilarArtist } = addSimilarArtistMutation;
+  const { mutateAsync: downloadTrack } = downloadTrackMutation;
+  const idsLoading = artistOverridesQuery.isFetching;
+  const idsSaving = saveArtistOverridesMutation.isPending;
 
   const stream = useArtistDetailsStream(mbid, artistNameFromNav, {
     visibleCoverIds: [
@@ -178,7 +204,7 @@ function ArtistDetailsPage() {
       const artistId = similarArtist?.id || similarArtist?.mbid;
       if (!similarArtist?.name || !artistId) return false;
       try {
-        await addArtistToLibrary({
+        await addSimilarArtist({
           foreignArtistId: artistId,
           artistName: similarArtist.name,
         });
@@ -194,7 +220,7 @@ function ArtistDetailsPage() {
         return false;
       }
     },
-    [showError, showSuccess],
+    [addSimilarArtist, showError, showSuccess],
   );
 
   const library = useArtistDetailsLibrary({
@@ -216,12 +242,7 @@ function ArtistDetailsPage() {
     locationState,
   });
 
-  const preview = usePreviewPlayer(mbid, artistNameFromNav, artist, {
-    existsInLibrary,
-    libraryArtist,
-    libraryAlbums,
-    downloadStatuses: library.downloadStatuses || {},
-  });
+  const preview = usePreviewPlayer(mbid, artistNameFromNav, artist);
   const {
     previewTracks,
     loadingPreview,
@@ -238,9 +259,8 @@ function ArtistDetailsPage() {
     if (!mbid) return;
     setShowEditIdsModal(true);
     setIdsError("");
-    setIdsLoading(true);
     try {
-      const data = await getArtistOverrides(mbid);
+      const { data } = await artistOverridesQuery.refetch({ throwOnError: true });
       setIdsValues({
         musicbrainzId: data?.musicbrainzId || "",
         deezerArtistId: data?.deezerArtistId || "",
@@ -252,8 +272,6 @@ function ArtistDetailsPage() {
           err.message ||
           "Failed to load artist IDs",
       );
-    } finally {
-      setIdsLoading(false);
     }
   };
 
@@ -269,15 +287,17 @@ function ArtistDetailsPage() {
       setIdsError("Deezer Artist ID must be numeric.");
       return;
     }
-    setIdsSaving(true);
     setIdsError("");
     setLoadingCover(true);
     setLoadingPreview(true);
     setLoadingSimilar(true);
     try {
-      await updateArtistOverrides(mbid, {
-        musicbrainzId: musicbrainzId || null,
-        deezerArtistId: deezerArtistId || null,
+      await saveArtistOverrides({
+        artistMbid: mbid,
+        values: {
+          musicbrainzId: musicbrainzId || null,
+          deezerArtistId: deezerArtistId || null,
+        },
       });
       showSuccess("Artist IDs updated");
       setShowEditIdsModal(false);
@@ -306,7 +326,6 @@ function ArtistDetailsPage() {
       setLoadingCover(false);
       setLoadingPreview(false);
       setLoadingSimilar(false);
-      setIdsSaving(false);
     }
   };
 
@@ -413,10 +432,46 @@ function ArtistDetailsPage() {
     return saveTrackToPlaylist(payload, target, savingKey);
   };
 
+  const handleTrackAddToLibrary = async (track, releaseGroup = null, trackKey = null) => {
+    const payload = releaseGroup
+      ? buildReleaseTrackPayload(track, releaseGroup)
+      : buildPreviewTrackPayload(track);
+    if (!payload?.artistName || !payload?.trackName) {
+      showError("Track details are incomplete");
+      return false;
+    }
+    const savingKey = String(trackKey ?? track?.id ?? track?.mbid ?? track?.title ?? "");
+    if (!savingKey) return false;
+    setLibraryTrackSavingKeys((current) => new Set(current).add(savingKey));
+    try {
+      const result = await downloadTrack(payload);
+      showSuccess(
+        result?.alreadyOwned
+          ? `${payload.trackName} is already in your library`
+          : result?.queued
+            ? `Queued ${payload.trackName} for your library`
+            : `Added ${payload.trackName} to your library`,
+      );
+    } catch (err) {
+      showError(
+        err.response?.data?.message ||
+          err.response?.data?.error ||
+          err.message ||
+          "Failed to add track to library",
+      );
+    } finally {
+      setLibraryTrackSavingKeys((current) => {
+        const next = new Set(current);
+        next.delete(savingKey);
+        return next;
+      });
+    }
+  };
+
   if (loading) {
     return (
       <div className="artist-loading">
-        <Loader className="artist-spinner artist-spinner--large animate-spin" />
+        <DotLoader size="2xl" label={null} />
       </div>
     );
   }
@@ -485,6 +540,8 @@ function ArtistDetailsPage() {
         isArtistPlaybackActive={isArtistPlaybackActive}
         handlePreviewPlay={handlePreviewPlay}
         onAddTrackToPlaylist={handlePreviewTrackAdd}
+        onAddTrackToLibrary={handleTrackAddToLibrary}
+        libraryTrackSavingKeys={libraryTrackSavingKeys}
         resolveMembershipTrack={buildPreviewTrackPayload}
         playlists={sharedPlaylists}
         playlistsLoading={playlistModalLoading}
@@ -507,6 +564,8 @@ function ArtistDetailsPage() {
         playbackSource={playbackSource}
         artistName={artistDisplayName}
         onAddTrackToPlaylist={handleReleaseTrackAdd}
+        onAddTrackToLibrary={handleTrackAddToLibrary}
+        libraryTrackSavingKeys={libraryTrackSavingKeys}
         resolveMembershipTrack={buildReleaseTrackPayload}
         playlists={sharedPlaylists}
         playlistsLoading={playlistModalLoading}
@@ -699,7 +758,7 @@ function EditArtistIdsModal({
           <h3 id={titleId} className="artist-modal__title">
             Edit Artist IDs
           </h3>
-          <button
+          <TooltipButton
             type="button"
             className="btn btn-surface btn-icon-square"
             onClick={onClose}
@@ -707,7 +766,7 @@ function EditArtistIdsModal({
             title="Close"
           >
             <X className="artist-icon-md" />
-          </button>
+          </TooltipButton>
         </div>
         <p className="artist-modal__subcopy">
           {artistName ? `${artistName}: ` : ""}
@@ -759,6 +818,7 @@ function EditArtistIdsModal({
             onClick={onSave}
             disabled={loading || saving}
           >
+            {saving ? <DotLoader size="sm" label={null} /> : null}
             {saving ? "Saving..." : "Save IDs"}
           </button>
         </div>

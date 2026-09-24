@@ -2,7 +2,6 @@ import { randomUUID } from "crypto";
 import { db } from "../../config/db-sqlite.js";
 import { enqueuePipelineJob } from "../honkerDb.js";
 import { isAnyDownloadSourceConfigured } from "../downloadSourceService.js";
-import { buildPlaylistDestination } from "../playlistPaths.js";
 import {
   normalizePositiveInteger,
   normalizeStringList,
@@ -10,6 +9,11 @@ import {
   sanitizePathPart,
   stringifyStringListJson,
 } from "../playlistDownloadUtils.js";
+import {
+  buildAurralTrackDestination,
+} from "../playlistPaths.js";
+import { flowPlaylistConfig } from "./weeklyFlowPlaylistConfig.js";
+import { logger } from "../logger.js";
 
 const parseDeniedSources = (raw) => {
   if (!raw) return [];
@@ -22,6 +26,39 @@ const parseDeniedSources = (raw) => {
 };
 
 const JOBS_TABLE = "playlist_download_jobs";
+const dataVersionStmt = db.prepare("PRAGMA data_version");
+const persistedRevisionStmt = db.prepare(
+  "SELECT revision FROM playlist_download_jobs_revision WHERE id = 1",
+);
+const liveJobStmt = db.prepare(`SELECT * FROM ${JOBS_TABLE} WHERE id = ?`);
+const livePlaylistJobsStmt = db.prepare(
+  `SELECT * FROM ${JOBS_TABLE} WHERE playlist_type = ? ORDER BY created_at, id`,
+);
+const livePlaylistJobsLimitedStmt = db.prepare(
+  `SELECT * FROM ${JOBS_TABLE} WHERE playlist_type = ? ORDER BY created_at, id LIMIT ?`,
+);
+const liveStatusJobsStmt = db.prepare(
+  `SELECT * FROM ${JOBS_TABLE} WHERE status = ? ORDER BY created_at, id`,
+);
+const liveStatsStmt = db.prepare(
+  `SELECT playlist_type, status, COUNT(*) AS count FROM ${JOBS_TABLE} GROUP BY playlist_type, status`,
+);
+const liveNextPendingStmt = db.prepare(
+  `SELECT * FROM ${JOBS_TABLE} WHERE status = 'pending' AND upgrade_for_job_id IS NULL
+   ORDER BY created_at, id LIMIT 1`,
+);
+const liveDoneWithPathStmt = db.prepare(
+  `SELECT * FROM ${JOBS_TABLE} WHERE status = 'done' AND final_path IS NOT NULL
+   ORDER BY created_at, id LIMIT ?`,
+);
+const livePendingStmt = db.prepare(
+  `SELECT * FROM ${JOBS_TABLE} WHERE status = 'pending' AND upgrade_for_job_id IS NULL
+   ORDER BY created_at, id LIMIT ?`,
+);
+const liveActivePlaylistStmt = db.prepare(
+  `SELECT 1 FROM ${JOBS_TABLE} WHERE playlist_type = ?
+   AND status IN ('pending', 'downloading') LIMIT 1`,
+);
 
 function rowToJob(row) {
   return {
@@ -44,6 +81,8 @@ function rowToJob(row) {
     artistAliases: parseStringListJson(row.artist_aliases),
     playlistId: row.playlist_id || row.playlist_type,
     playlistType: row.playlist_type || row.playlist_id,
+    managedBy: row.managed_by === "lidarr" ? "lidarr" : "aurral",
+    requestGroupId: row.request_group_id || null,
     status: row.status,
     startedAt: row.started_at,
     completedAt: row.completed_at,
@@ -94,6 +133,8 @@ const insertStmt = db.prepare(`
     artist_aliases,
     playlist_id,
     playlist_type,
+    managed_by,
+    request_group_id,
     status,
     staging_path,
     final_path,
@@ -111,7 +152,7 @@ const insertStmt = db.prepare(`
     quality_upgrade_checked_at,
     upgrade_for_job_id
   )
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 
 const updateStmt = db.prepare(`
@@ -209,6 +250,7 @@ function buildPipelinePayload(job) {
   const playlistId = job.playlistId || job.playlistType;
   const artistDir = sanitizePathPart(job.artistName, "Unknown Artist");
   const albumDir = sanitizePathPart(job.albumName, "Unknown Album");
+  const ephemeral = Boolean(flowPlaylistConfig.getFlow(String(job.playlistType || "").trim()));
   return {
     phase: "search",
     jobId: job.id,
@@ -228,10 +270,10 @@ function buildPipelinePayload(job) {
       artistAliases: job.artistAliases || [],
     },
     attempt: 0,
-    destination: buildPlaylistDestination(playlistId, artistDir, albumDir),
+    destination: buildAurralTrackDestination(playlistId, artistDir, albumDir, { ephemeral }),
     upgrade: Boolean(job.upgradeForJobId),
     upgradeForJobId: job.upgradeForJobId || null,
-    allowedSources: job.upgradeForJobId ? ["slskd", "usenet"] : null,
+    allowedSources: job.upgradeForJobId ? ["slskd", "usenet", "deemix"] : null,
   };
 }
 
@@ -247,6 +289,42 @@ export class WeeklyFlowDownloadTracker {
     this.slskdDispatched = new Set();
     this.revision = 0;
     this._load();
+    this.externalDataVersion = dataVersionStmt.get()?.data_version;
+    this.externalJobsRevision = persistedRevisionStmt.get()?.revision;
+  }
+
+  _refreshExternalChanges() {
+    if (this.externalDataVersion === undefined) return;
+    if (process.env.NODE_ENV === "test" || process.env.AURRAL_TEST_SERVER === "1") return;
+    const version = dataVersionStmt.get()?.data_version;
+    if (version === this.externalDataVersion) return;
+    this.externalDataVersion = version;
+    const jobsRevision = persistedRevisionStmt.get()?.revision;
+    if (jobsRevision === this.externalJobsRevision) return;
+    this.externalJobsRevision = jobsRevision;
+    const previousJobs = this.jobs;
+    const previousRetryIds = this.pendingRetrySet;
+    const nextJobs = new Map();
+    for (const row of selectAllStmt.all()) {
+      const fresh = rowToJob(row);
+      const previous = previousJobs.get(fresh.id);
+      fresh.retryCycle = previous?.retryCycle === true || previousRetryIds.has(fresh.id);
+      if (previous) Object.assign(previous, fresh);
+      nextJobs.set(fresh.id, previous || fresh);
+    }
+    this.jobs = nextJobs;
+    this.slskdDispatched = new Set(
+      [...this.slskdDispatched].filter((id) => nextJobs.has(id)),
+    );
+    this._rebuildStatsByPlaylistType();
+    for (const id of previousRetryIds) {
+      const job = nextJobs.get(id);
+      if (!job || job.status !== "pending") continue;
+      this.pendingRetrySet.add(id);
+      this.pendingFreshQueue = this.pendingFreshQueue.filter((entry) => entry !== id);
+      this.pendingRetryQueue.push(id);
+    }
+    this._touchRevision();
   }
 
   _touchRevision() {
@@ -422,7 +500,10 @@ export class WeeklyFlowDownloadTracker {
     const rows = selectAllStmt.all();
     for (const row of rows) {
       const job = rowToJob(row);
-      if (job.status === "downloading") {
+      if (job.status === "downloading" && (
+        process.env.AURRAL_BACKGROUND_WORKER_GROUP === "flow" ||
+        process.env.NODE_ENV === "test" || process.env.AURRAL_TEST_SERVER === "1"
+      )) {
         job.status = "pending";
         job.startedAt = null;
         job.stagingPath = null;
@@ -458,8 +539,11 @@ export class WeeklyFlowDownloadTracker {
       }
       this.jobs.set(job.id, job);
     }
-    for (const job of this.jobs.values()) {
-      if (job.status === "pending" && job.upgradeForJobId) this.removeJob(job.id);
+    if (process.env.AURRAL_BACKGROUND_WORKER_GROUP === "flow" ||
+        process.env.NODE_ENV === "test" || process.env.AURRAL_TEST_SERVER === "1") {
+      for (const job of this.jobs.values()) {
+        if (job.status === "pending" && job.upgradeForJobId) this.removeJob(job.id);
+      }
     }
     this._rebuildStatsByPlaylistType();
   }
@@ -484,6 +568,8 @@ export class WeeklyFlowDownloadTracker {
       stringifyStringListJson(job.artistAliases),
       job.playlistId || job.playlistType,
       job.playlistType || job.playlistId,
+      job.managedBy === "lidarr" ? "lidarr" : "aurral",
+      job.requestGroupId ?? null,
       job.status,
       job.stagingPath ?? null,
       job.finalPath ?? null,
@@ -564,6 +650,10 @@ export class WeeklyFlowDownloadTracker {
       artistAliases: normalizeStringList(track?.artistAliases),
       playlistId: playlistType,
       playlistType,
+      managedBy: track?.managedBy === "lidarr" ? "lidarr" : "aurral",
+      requestGroupId: track?.requestGroupId
+        ? String(track.requestGroupId).trim() || null
+        : null,
       status: "pending",
       startedAt: null,
       completedAt: null,
@@ -662,6 +752,14 @@ export class WeeklyFlowDownloadTracker {
       changed.push(job);
     }
     return changed;
+  }
+
+  updateFinalPath(id, finalPath) {
+    const job = this.jobs.get(id);
+    if (!job || job.status !== "done") return false;
+    job.finalPath = finalPath;
+    this._update(job);
+    return true;
   }
 
   updateMetadata(id, metadata = {}) {
@@ -1013,6 +1111,7 @@ export class WeeklyFlowDownloadTracker {
       updatePlaylistTypeStmt.run(toId, toId, fromId);
       for (const job of this.jobs.values()) {
         if (job.playlistType === fromId) {
+          job.playlistId = toId;
           job.playlistType = toId;
           count += 1;
         }
@@ -1088,7 +1187,12 @@ export class WeeklyFlowDownloadTracker {
             recordTrackJobFailed(job, job.error || error);
           }
         })
-        .catch(() => {});
+        .catch((historyError) => {
+          logger.warn("history", "Could not record failed download jobs", {
+            jobCount: failedJobs.length,
+            reason: historyError?.message || String(historyError),
+          });
+        });
     }
     return count;
   }
@@ -1192,6 +1296,83 @@ export class WeeklyFlowDownloadTracker {
   getRevision() {
     return this.revision;
   }
+}
+
+const liveJobs = (rows) => rows.map(rowToJob);
+const emptyLiveStats = () => ({
+  total: 0, pending: 0, downloading: 0, blocked: 0, done: 0, failed: 0,
+});
+
+function readTrackerFromDatabase(name, args) {
+  const [first, second] = args;
+  if (name === "getJob") {
+    const row = liveJobStmt.get(first ?? null);
+    return row ? rowToJob(row) : null;
+  }
+  if (name === "getAll") return liveJobs(selectAllStmt.all());
+  if (name === "getByPlaylistType") {
+    const limit = Number(second);
+    const rows = Number.isFinite(limit) && limit > 0
+      ? livePlaylistJobsLimitedStmt.all(first ?? null, Math.floor(limit))
+      : livePlaylistJobsStmt.all(first ?? null);
+    return liveJobs(rows);
+  }
+  if (name === "getByStatus") return liveJobs(liveStatusJobsStmt.all(first ?? null));
+  if (name === "getDoneWithFinalPath") {
+    const limit = Number.isFinite(Number(first)) && Number(first) > 0 ? Math.floor(Number(first)) : 500;
+    return liveJobs(liveDoneWithPathStmt.all(limit));
+  }
+  if (name === "getNextPending") {
+    const row = liveNextPendingStmt.get();
+    return row ? rowToJob(row) : null;
+  }
+  if (name === "peekPending") {
+    const limit = Number.isFinite(Number(first)) && Number(first) > 0 ? Math.floor(Number(first)) : 10;
+    return liveJobs(livePendingStmt.all(limit));
+  }
+  if (name === "hasActiveJobsForPlaylist") {
+    return !!liveActivePlaylistStmt.get(first ?? null);
+  }
+  if (name === "getRevision") return persistedRevisionStmt.get()?.revision || 0;
+  if (name === "getStats" || name === "getStatsByPlaylistType" || name === "getPlaylistTypeStats") {
+    const byPlaylist = {};
+    const totals = emptyLiveStats();
+    for (const row of liveStatsStmt.all()) {
+      const count = Number(row.count) || 0;
+      if (!byPlaylist[row.playlist_type]) byPlaylist[row.playlist_type] = emptyLiveStats();
+      if (row.status in totals) {
+        byPlaylist[row.playlist_type][row.status] += count;
+        byPlaylist[row.playlist_type].total += count;
+        totals[row.status] += count;
+        totals.total += count;
+      }
+    }
+    if (name === "getStats") return totals;
+    if (name === "getPlaylistTypeStats") return byPlaylist[String(first)] || emptyLiveStats();
+    if (!Array.isArray(first) || first.length === 0) return byPlaylist;
+    return Object.fromEntries(first.map((id) => [id, byPlaylist[id] || emptyLiveStats()]));
+  }
+  return undefined;
+}
+
+const LIVE_READ_METHODS = new Set([
+  "getJob", "getAll", "getByPlaylistType", "getByStatus", "getDoneWithFinalPath",
+  "getNextPending", "peekPending", "hasActiveJobsForPlaylist", "getRevision",
+  "getStats", "getStatsByPlaylistType", "getPlaylistTypeStats",
+]);
+
+for (const name of Object.getOwnPropertyNames(WeeklyFlowDownloadTracker.prototype)) {
+  if (name === "constructor" || name.startsWith("_")) continue;
+  const original = WeeklyFlowDownloadTracker.prototype[name];
+  if (typeof original !== "function") continue;
+  WeeklyFlowDownloadTracker.prototype[name] = function (...args) {
+    if (process.env.NODE_ENV !== "test" && process.env.AURRAL_TEST_SERVER !== "1" &&
+        process.env.AURRAL_BACKGROUND_WORKER_GROUP !== "flow" && LIVE_READ_METHODS.has(name)) {
+      return readTrackerFromDatabase(name, args);
+    }
+    this._refreshExternalChanges();
+    return original.apply(this, args);
+  };
 }
 
 export const downloadTracker = new WeeklyFlowDownloadTracker();

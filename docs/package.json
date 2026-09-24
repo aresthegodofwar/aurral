@@ -5,12 +5,11 @@
   "scripts": {
     "dev": "astro dev",
     "build": "astro build",
-    "preview": "astro preview",
-    "test": "node --test src/scripts/*.test.js"
+    "preview": "astro preview"
   },
   "dependencies": {
-    "@astrojs/starlight": "^0.41.5",
-    "astro": "^7.1.6"
+    "@astrojs/starlight": "^0.42.2",
+    "astro": "^7.3.3"
   },
   "engines": {
     "node": ">=20"

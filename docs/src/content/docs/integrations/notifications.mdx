@@ -3,13 +3,13 @@ title: Notifications (Gotify and webhooks)
 description: Get alerts when flows finish, discovery updates, and album requests change.
 ---
 
-Aurral can send a notification when a flow download completes. It can also send one when daily recommendations are ready, when a user requests an album, and when that album becomes available.
+Aurral can send a notification when a Flow download completes. It can also send one when daily recommendations are ready, when a user requests an album, and when that album becomes available.
 
 Two delivery methods are available. You can use one or both.
 
 ## Gotify
 
-Gotify is a self-hosted push notification server. Configure it in **Settings > Connect**.
+Gotify is a self-hosted push notification server. Configure it in **Settings > Connect**. Gotify and webhooks have separate event toggles, so configure each delivery method independently.
 
 Enter these values:
 - **Server URL**: the base URL Aurral can reach (for example, `http://gotify:8888` in Docker)
@@ -31,7 +31,7 @@ Enter these values for each webhook:
 - **URL**: the endpoint to call (must start with `http://` or `https://`)
 - **Body**: optional JSON data. Use these placeholders:
   - `$flowName`: playlist display name
-  - `$flowPath`: on-disk playlist track folder under `aurral-weekly-flow` (not the `_playlists` M3U folder)
+  - `$flowPath`: on-disk Aurral media path. For a Flow, this is `_flows/<flow-id>`; for a static playlist, it is the Downloads Folder root.
   - `$albumName`, `$artistName`, `$username`, `$userId`, and `$event` for request events
 - **Headers**: optional key-value pairs
 
@@ -44,3 +44,19 @@ Toggle which events fire for your webhooks:
 - **Notify when a request is available**
 
 Aurral does not send events that you turn off, even if you configured webhook URLs.
+
+Select **Test webhook** on a webhook card to send that webhook's current URL,
+body, and headers immediately. The test does not depend on the notification
+event switches and does not save the settings. A blank body sends a `GET`
+request. A body sends a `POST` request with the same placeholder interpolation
+used by notification events.
+
+Test requests use these placeholder values:
+
+- `$event`: `webhookTest`
+- `$flowName`: `Aurral webhook test`
+- `$flowPath`: `/aurral/test-webhook`
+- `$albumName`: `Test album`
+- `$artistName`: `Test artist`
+- `$username`: `webhook-test-user`
+- `$userId`: `webhook-test-user`

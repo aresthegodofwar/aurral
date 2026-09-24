@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { ListMusic, Loader2, MoreVertical, Plus, RefreshCw } from "lucide-react";
+import { ListMusic, MoreVertical, Plus, RefreshCw } from "lucide-react";
+import { DotLoader } from "./DotLoader";
+import TooltipButton from "./TooltipButton";
 
 const getMenuHorizontalAnchorRect = (button) => {
   const discoverCard = button.closest(".artist-discover-card");
@@ -29,6 +31,7 @@ export function DiscoverPlaylistContextMenu({
   const menuButtonRef = useRef(null);
   const menuRef = useRef(null);
   const closeMenuRef = useRef(null);
+  const restoreFocusRef = useRef(false);
   const playlistName = String(playlist?.name || "playlist").trim() || "playlist";
   const presetId = playlist?.presetId;
   const isAdoptingFlow = adoptingFlowId === presetId;
@@ -121,6 +124,12 @@ export function DiscoverPlaylistContextMenu({
   }, [showMenu, updateMenuPosition]);
 
   useEffect(() => {
+    if (showMenu || isBusy || !restoreFocusRef.current) return;
+    restoreFocusRef.current = false;
+    menuButtonRef.current?.focus();
+  }, [showMenu, isBusy]);
+
+  useEffect(() => {
     if (!showMenu) return undefined;
     const handlePointerDown = (event) => {
       if (
@@ -133,6 +142,7 @@ export function DiscoverPlaylistContextMenu({
     };
     const handleEscape = (event) => {
       if (event.key === "Escape") {
+        restoreFocusRef.current = true;
         closeMenu();
       }
     };
@@ -194,7 +204,7 @@ export function DiscoverPlaylistContextMenu({
       style={{ position: "relative", flexShrink: 0 }}
       onClick={(event) => event.stopPropagation()}
     >
-      <button
+      <TooltipButton
         ref={menuButtonRef}
         type="button"
         onClick={(event) => {
@@ -205,22 +215,23 @@ export function DiscoverPlaylistContextMenu({
             openMenu();
           }
         }}
-        className={triggerClassName}
+        className={"btn " + (triggerClassName)}
         disabled={isBusy}
         aria-label={`Playlist options for ${playlistName}`}
         title={`Playlist options for ${playlistName}`}
+        aria-haspopup="menu"
         aria-expanded={showMenu}
       >
         {triggerVariant === "add" ? (
           isBusy ? (
-            <Loader2 className="artist-icon-md animate-spin" />
+            <DotLoader size="md" label={null} />
           ) : (
             <Plus className="artist-icon-md" />
           )
         ) : (
           <MoreVertical className="artist-icon-sm" />
         )}
-      </button>
+      </TooltipButton>
       {showMenu && menuPosition
         ? createPortal(
             <div
@@ -230,17 +241,21 @@ export function DiscoverPlaylistContextMenu({
                 top: menuPosition.top,
                 left: menuPosition.left,
               }}
+              role="menu"
+              aria-label={`Actions for ${playlistName}`}
+              aria-busy={isBusy}
               onClick={(event) => event.stopPropagation()}
             >
               <button
                 type="button"
+                role="menuitem"
                 onClick={handleFlowClick}
                 disabled={isBusy}
                 className={`artist-menu-item--discover${playlist.adoptedFlowId ? " is-selected" : ""}`}
               >
                 <div className="artist-menu-item__main--discover">
                   {pendingAction === "flow" || isAdoptingFlow ? (
-                    <Loader2 className="artist-icon-sm animate-spin" />
+                    <DotLoader size="sm" label={null} />
                   ) : (
                     <RefreshCw className="artist-icon-sm" />
                   )}
@@ -249,13 +264,14 @@ export function DiscoverPlaylistContextMenu({
               </button>
               <button
                 type="button"
+                role="menuitem"
                 onClick={handlePlaylistClick}
                 disabled={isBusy}
                 className={`artist-menu-item--discover${playlist.adoptedPlaylistId ? " is-selected" : ""}`}
               >
                 <div className="artist-menu-item__main--discover">
                   {pendingAction === "playlist" || isAdoptingPlaylist ? (
-                    <Loader2 className="artist-icon-sm animate-spin" />
+                    <DotLoader size="sm" label={null} />
                   ) : (
                     <ListMusic className="artist-icon-sm" />
                   )}

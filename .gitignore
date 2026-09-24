@@ -11,7 +11,14 @@ dist/
 
 # Test output
 coverage/
+test-results/
+playwright-report/
 
 # Private maintainer instructions
 /.maintainer/
 /AGENTS.md
+/.agents/
+
+# Local planning artifacts
+/SPEC.md
+/tasks/

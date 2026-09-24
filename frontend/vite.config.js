@@ -57,13 +57,17 @@ export default defineConfig(({ mode }) => {
     build: {
       outDir: "dist",
       emptyOutDir: true,
+      // Avoid speculative modulepreload requests that Chrome reports as unused
+      // when a service worker controls the page and routes load on demand.
+      modulePreload: false,
     },
     server: {
       port: 3000,
       proxy: {
         "/api": {
           target: "http://localhost:3001",
-          changeOrigin: true,
+          changeOrigin: false,
+          xfwd: true,
           secure: false,
           ws: true,
           timeout: 60000,
@@ -72,6 +76,7 @@ export default defineConfig(({ mode }) => {
         "/sso/callback": {
           target: "http://localhost:3001",
           changeOrigin: true,
+          xfwd: true,
           secure: false,
         },
         "/ws": {

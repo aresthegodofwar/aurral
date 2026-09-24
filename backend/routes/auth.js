@@ -42,12 +42,14 @@ router.post("/login", async (req, res) => {
     if (user.status !== "active") {
       return res.status(403).json({ error: "This account has been suspended or disabled" });
     }
+    const updates = { subsonicPassword: password };
     if (needsRehash(user.passwordHash)) {
-      userOps.updateUser(user.id, { passwordHash: hashPassword(password) });
+      updates.passwordHash = hashPassword(password);
     }
     if (!user.hasLocalPassword) {
-      userOps.updateUser(user.id, { hasLocalPassword: true });
+      updates.hasLocalPassword = true;
     }
+    userOps.updateUser(user.id, updates);
     const session = createSession(user.id, req.ip || null, req.headers["user-agent"] || null);
     res.json({
       token: session.token,

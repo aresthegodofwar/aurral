@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 import { AlertCircle, Check, Copy, RotateCcw } from "lucide-react";
+import { DotLoader } from "../../../components/DotLoader";
 import { getApiKey, rotateApiKey } from "../../../utils/api/endpoints/auth";
 import { SettingsSystemSection } from "./SettingsStorageSection";
 import { SettingsSelect } from "./SettingsField";
+import PillToggle from "../../../components/PillToggle";
 import { setDateTimeFormat } from "../../../utils/dateTime.js";
+import Tooltip from "../../../components/Tooltip";
 
 export function SettingsSystemTab({ health, settings, updateSettings, showSuccess, showError }) {
   const [apiKey, setApiKey] = useState(null);
@@ -89,6 +92,40 @@ export function SettingsSystemTab({ health, settings, updateSettings, showSucces
         </div>
       </section>
 
+      <section className="settings-system__section">
+        <div className="settings-system__section-header">
+          <h2 className="settings-system__section-title">Subsonic</h2>
+        </div>
+        <div className="settings-system__rows">
+          <div className="settings-system__row">
+            <div className="settings-system__copy">
+              <label className="settings-system__label" htmlFor="subsonic-favorite-auto-keep">
+                Favorite Flow tracks
+              </label>
+              <p className="settings-system__description">
+                Keep a Flow track in the permanent Library when a Subsonic client favorites it.
+              </p>
+            </div>
+            <div className="settings-system__value">
+              <PillToggle
+                id="subsonic-favorite-auto-keep"
+                checked={settings.subsonic?.favoriteAutoKeep !== false}
+                onChange={(event) =>
+                  updateSettings({
+                    ...settings,
+                    subsonic: {
+                      ...(settings.subsonic || {}),
+                      favoriteAutoKeep: event.target.checked,
+                    },
+                  })
+                }
+                aria-label="Keep Flow tracks when favorited through Subsonic"
+              />
+            </div>
+          </div>
+        </div>
+      </section>
+
       <section className="settings-system__section settings-system__api-section">
         <div className="settings-system__section-header">
           <h2 className="settings-system__section-title">API access</h2>
@@ -103,7 +140,9 @@ export function SettingsSystemTab({ health, settings, updateSettings, showSucces
               <div className="settings-system__copy">
                 <div className="settings-system__label">API key</div>
               </div>
-              <div className="settings-system__value">Loading…</div>
+              <div className="settings-system__value">
+                <DotLoader size="sm" label={null} /> Loading…
+              </div>
             </div>
           ) : apiKey ? (
             <div className="settings-system__row">
@@ -112,34 +151,40 @@ export function SettingsSystemTab({ health, settings, updateSettings, showSucces
                 <p className="settings-system__description">Keep this key private.</p>
               </div>
               <div className="settings-system__api-value">
-                <code className="settings-system__api-key" title="API key">
-                  {apiKey}
-                </code>
-                <button
-                  type="button"
-                  className="arr-btn arr-btn--ghost arr-btn--icon"
-                  onClick={handleCopy}
-                  title={copied ? "Copied" : "Copy to clipboard"}
-                  aria-label={copied ? "Copied" : "Copy API key"}
-                >
-                  {copied ? (
-                    <Check className="artist-icon-xs" />
-                  ) : (
-                    <Copy className="artist-icon-xs" />
-                  )}
-                </button>
-                <button
-                  type="button"
-                  className="arr-btn arr-btn--ghost arr-btn--icon"
-                  onClick={handleRotate}
-                  disabled={rotating}
-                  title="Rotate API key"
-                  aria-label="Rotate API key"
-                >
-                  <RotateCcw
-                    className={"artist-icon-xs" + (rotating ? " animate-spin" : "")}
-                  />
-                </button>
+                <Tooltip content="API key">
+                  <code className="settings-system__api-key" >
+                    {apiKey}
+                  </code>
+                </Tooltip>
+                <Tooltip content={copied ? "Copied" : "Copy to clipboard"}>
+                  <button
+                    type="button"
+                    className="arr-btn arr-btn--ghost arr-btn--icon"
+                    onClick={handleCopy}
+                    aria-label={copied ? "Copied" : "Copy API key"}
+                  >
+                    {copied ? (
+                      <Check className="artist-icon-xs" />
+                    ) : (
+                      <Copy className="artist-icon-xs" />
+                    )}
+                  </button>
+                </Tooltip>
+                <Tooltip content="Rotate API key">
+                  <button
+                    type="button"
+                    className="arr-btn arr-btn--ghost arr-btn--icon"
+                    onClick={handleRotate}
+                    disabled={rotating}
+                    aria-label="Rotate API key"
+                  >
+                    {rotating ? (
+                      <DotLoader size="xs" label={null} />
+                    ) : (
+                      <RotateCcw className="artist-icon-xs" aria-hidden />
+                    )}
+                  </button>
+                </Tooltip>
               </div>
             </div>
           ) : (

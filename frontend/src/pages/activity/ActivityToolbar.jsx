@@ -1,0 +1,76 @@
+import { RefreshCw, Search, X } from "lucide-react";
+import { useEffect, useState } from "react";
+import TooltipButton from "../../components/TooltipButton";
+import { DotLoader } from "../../components/DotLoader";
+
+export default function ActivityToolbar({
+  filterValue,
+  onFilterChange,
+  onRefresh,
+  refreshing = false,
+  action = null,
+  placeholder = "Filter activity",
+}) {
+  const [filterOpen, setFilterOpen] = useState(Boolean(filterValue));
+
+  useEffect(() => {
+    if (filterValue) setFilterOpen(true);
+  }, [filterValue]);
+
+  const toggleFilter = () => {
+    if (filterOpen) onFilterChange("");
+    setFilterOpen((open) => !open);
+  };
+
+  return (
+    <div className="activity-toolbar">
+      {onRefresh ? (
+        <div className="activity-toolbar__group">
+          <TooltipButton
+            className="native-library-icon-button"
+            onClick={onRefresh}
+            disabled={refreshing}
+            label={refreshing ? "Refreshing" : "Refresh"}
+            aria-label="Refresh activity"
+          >
+            {refreshing ? (
+              <DotLoader size="sm" label={null} />
+            ) : (
+              <RefreshCw aria-hidden="true" />
+            )}
+          </TooltipButton>
+        </div>
+      ) : null}
+      <div className="activity-toolbar__group activity-toolbar__group--end">
+        {filterOpen ? (
+          <label className="activity-toolbar__filter">
+            <Search aria-hidden="true" />
+            <input
+              type="search"
+              value={filterValue}
+              onChange={(event) => onFilterChange(event.target.value)}
+              placeholder={placeholder}
+              aria-label={placeholder}
+              autoFocus
+            />
+            {filterValue ? (
+              <TooltipButton label="Clear filter" onClick={() => onFilterChange("")} className="btn">
+                <X aria-hidden="true" />
+              </TooltipButton>
+            ) : null}
+          </label>
+        ) : null}
+        <TooltipButton
+          className={`native-library-icon-button${filterOpen ? " is-active" : ""}`}
+          onClick={toggleFilter}
+          label={filterOpen ? "Close filter" : "Filter"}
+          aria-label={filterOpen ? "Close activity filter" : "Filter activity"}
+          aria-pressed={filterOpen}
+        >
+          <Search aria-hidden="true" />
+        </TooltipButton>
+        {action}
+      </div>
+    </div>
+  );
+}

@@ -22,6 +22,288 @@ test("isCircuitOpen returns stale GET cache instead of throwing", async () => {
   assert.equal(artists[0].artistName, "Test");
 });
 
+test("bulk track reads use Lidarr artist selectors", async (t) => {
+  const requests = [];
+  const server = http.createServer((request, response) => {
+    requests.push(request.url);
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify([{ id: 1, albumId: 2 }]));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(async () => {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  const address = server.address();
+  const client = new LidarrClient();
+  client._holdConfig = true;
+  client.config = {
+    url: `http://127.0.0.1:${address.port}`,
+    apiKey: "test",
+    timeoutMs: 2000,
+    circuitDisabled: true,
+  };
+
+  await client.getAllTracks({ artistIds: [7, 8], throwOnError: true });
+  await client.getAllTrackFiles({ artistIds: [7, 8], throwOnError: true });
+
+  assert.deepEqual(requests.sort(), [
+    "/api/v1/track?artistId=7",
+    "/api/v1/track?artistId=8",
+    "/api/v1/trackfile?artistId=7",
+    "/api/v1/trackfile?artistId=8",
+  ]);
+  client._httpAgent.destroy();
+  client._httpsAgent.destroy();
+  client._httpsInsecureAgent.destroy();
+});
+
+test("bulk album reads use Lidarr artist selectors when requested", async (t) => {
+  const requests = [];
+  const server = http.createServer((request, response) => {
+    requests.push(request.url);
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end("[]");
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(async () => {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  const address = server.address();
+  const client = new LidarrClient();
+  client._holdConfig = true;
+  client.config = {
+    url: `http://127.0.0.1:${address.port}`,
+    apiKey: "test",
+    timeoutMs: 2000,
+    circuitDisabled: true,
+  };
+
+  await client.getAllAlbums({ artistIds: [7, 8], forceRefresh: true });
+
+  assert.deepEqual(requests.sort(), [
+    "/api/v1/album?artistId=7",
+    "/api/v1/album?artistId=8",
+  ]);
+  client._httpAgent.destroy();
+  client._httpsAgent.destroy();
+  client._httpsInsecureAgent.destroy();
+});
+
+test("no-response Lidarr errors identify the endpoint and timeout", async (t) => {
+  const server = http.createServer((request) => request.destroy());
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(async () => {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  const address = server.address();
+  const client = new LidarrClient();
+  client._holdConfig = true;
+  client.config = {
+    url: `http://127.0.0.1:${address.port}`,
+    apiKey: "test",
+    timeoutMs: 2000,
+    circuitDisabled: true,
+  };
+  const originalConsoleError = console.error;
+  const errors = [];
+  console.error = (...args) => errors.push(args);
+  t.after(() => {
+    console.error = originalConsoleError;
+    client._httpAgent.destroy();
+    client._httpsAgent.destroy();
+    client._httpsInsecureAgent.destroy();
+  });
+
+  await assert.rejects(
+    client.request("/album?artistId=7"),
+    /GET \/album: This operation was aborted|GET \/album: fetch failed/,
+  );
+  assert.match(JSON.stringify(errors), /Lidarr API request failed with no response/);
+  assert.match(JSON.stringify(errors), /timeoutMs/);
+  assert.match(JSON.stringify(errors), /\/album/);
+});
+
+test("bulk reads wait for active requests before failing", async () => {
+  const client = new LidarrClient();
+  const artistIds = Array.from({ length: 14 }, (_, index) => index + 1);
+  const started = [];
+  let releaseFailure;
+  let releasePending;
+  let resolveInitialRequests;
+  const failure = new Promise((resolve) => {
+    releaseFailure = resolve;
+  });
+  const pending = new Promise((resolve) => {
+    releasePending = resolve;
+  });
+  const initialRequests = new Promise((resolve) => {
+    resolveInitialRequests = resolve;
+  });
+
+  client.request = async (endpoint) => {
+    const artistId = Number(new URL(`http://localhost${endpoint}`).searchParams.get("artistId"));
+    started.push(artistId);
+    if (started.length === 12) resolveInitialRequests();
+    if (artistId === 1) {
+      await failure;
+      throw new Error("bulk track read failed");
+    }
+    if (artistId <= 12) await pending;
+    return [];
+  };
+
+  const read = client.getAllTracks({ artistIds, throwOnError: true });
+  await initialRequests;
+  releaseFailure();
+
+  let settled = false;
+  const rejection = read.catch((error) => {
+    settled = true;
+    throw error;
+  });
+  await delay(10);
+  assert.equal(settled, false);
+
+  releasePending();
+  await assert.rejects(rejection, /bulk track read failed/);
+  await delay(0);
+  assert.deepEqual(started, artistIds.slice(0, 12));
+});
+
+test("bulk track-file reads use bounded repeated ID selectors", async (t) => {
+  const requests = [];
+  const server = http.createServer((request, response) => {
+    const url = new URL(request.url, "http://127.0.0.1");
+    requests.push(url.searchParams.getAll("trackFileIds").map(Number));
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end("[]");
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(async () => {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  const address = server.address();
+  const client = new LidarrClient();
+  client._holdConfig = true;
+  client.config = {
+    url: `http://127.0.0.1:${address.port}`,
+    apiKey: "test",
+    timeoutMs: 2000,
+    circuitDisabled: true,
+  };
+
+  await client.getTrackFilesByIds(
+    Array.from({ length: 401 }, (_, index) => index + 1),
+    { throwOnError: true },
+  );
+
+  assert.deepEqual(
+    requests.map((batch) => batch.length).sort((left, right) => left - right),
+    [1, 400],
+  );
+  assert.deepEqual(requests.flat().sort((left, right) => left - right), [
+    ...Array.from({ length: 401 }, (_, index) => index + 1),
+  ]);
+  client._httpAgent.destroy();
+  client._httpsAgent.destroy();
+  client._httpsInsecureAgent.destroy();
+});
+
+test("testConnection preserves Lidarr HTTP diagnostics", async (t) => {
+  let status = 401;
+  const server = http.createServer((_request, response) => {
+    response.writeHead(status, {
+      "content-type": "application/json",
+      "x-test-header": String(status),
+    });
+    response.end(JSON.stringify({ message: `failure-${status}` }));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(async () => {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  const address = server.address();
+  const client = new LidarrClient();
+  client._holdConfig = true;
+  client.config = {
+    url: `http://127.0.0.1:${address.port}`,
+    apiKey: "test",
+    timeoutMs: 2000,
+    circuitDisabled: true,
+  };
+
+  let result = await client.testConnection(true);
+  assert.equal(result.statusCode, 401);
+  assert.match(result.details, /failure-401/);
+  assert.equal(result.responseHeaders["x-test-header"], "401");
+
+  status = 500;
+  result = await client.testConnection(true);
+  assert.equal(result.statusCode, 500);
+  assert.match(result.details, /failure-500/);
+  assert.equal(result.responseHeaders["x-test-header"], "500");
+
+  client._httpAgent.destroy();
+  client._httpsAgent.destroy();
+  client._httpsInsecureAgent.destroy();
+});
+
+test("missing Lidarr resources are absent records, not endpoint failures", async (t) => {
+  const requests = [];
+  const server = http.createServer((request, response) => {
+    requests.push([request.method, request.url]);
+    response.writeHead(404, { "content-type": "application/json" });
+    response.end(JSON.stringify({ message: "Artist with ID 2411485 does not exist" }));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(async () => {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  const address = server.address();
+  const client = new LidarrClient();
+  client._holdConfig = true;
+  client.config = {
+    url: `http://127.0.0.1:${address.port}`,
+    apiKey: "test",
+    timeoutMs: 2000,
+    circuitDisabled: true,
+  };
+  const originalConsoleError = console.error;
+  const errors = [];
+  console.error = (...args) => errors.push(args);
+  t.after(() => {
+    console.error = originalConsoleError;
+    client._httpAgent.destroy();
+    client._httpsAgent.destroy();
+    client._httpsInsecureAgent.destroy();
+  });
+
+  assert.equal(await client.getArtist(2411485), null);
+  assert.equal(await client.getAlbum(2411485), null);
+  await assert.rejects(
+    client.updateAlbum(2411485, { monitored: true }),
+    /Album with ID 2411485 not found in Lidarr/,
+  );
+  assert.deepEqual(requests, [
+    ["GET", "/api/v1/artist/2411485"],
+    ["GET", "/api/v1/album/2411485"],
+    ["GET", "/api/v1/album/2411485"],
+  ]);
+  assert.deepEqual(errors, []);
+});
+
 test("getAlbumByMbid avoids unrelated broken albums in Lidarr", async (t) => {
   const requests = [];
   const server = http.createServer((request, response) => {
@@ -329,7 +611,7 @@ test("artist add resolves a non-numeric Lidarr response ID before follow-up call
   client._httpsInsecureAgent.destroy();
 });
 
-test("artist add retries with the active metadata provider ID after a UUID format error", async (t) => {
+test("artist add resolves a numeric metadata-provider response ID", async (t) => {
   const artistMbid = "9c9f1380-2516-4fc9-a3e6-f9f61941d090";
   const requests = [];
   let providerPayload;
@@ -361,14 +643,14 @@ test("artist add retries with the active metadata provider ID after a UUID forma
       }
       providerPayload = payload;
       return {
-        id: 42,
+        id: 2411485,
         foreignArtistId: "705@deezer",
         artistName: "Muse",
         monitored: true,
       };
     }
     if (endpoint === "/artist" && method === "GET") {
-      return [{ id: 42, foreignArtistId: "705@deezer", artistName: "Muse" }];
+      return [{ id: 42, foreignArtistId: "705@deezer", artistName: "Muse", monitored: true }];
     }
     if (endpoint === `/artist/lookup?term=${encodeURIComponent("Muse")}` && method === "GET") {
       return [
@@ -397,6 +679,7 @@ test("artist add retries with the active metadata provider ID after a UUID forma
     { endpoint: "/artist", method: "POST" },
     { endpoint: `/artist/lookup?term=${encodeURIComponent("Muse")}`, method: "GET" },
     { endpoint: "/artist", method: "POST" },
+    { endpoint: "/artist", method: "GET" },
     { endpoint: "/artist", method: "GET" },
   ]);
 });
@@ -477,7 +760,14 @@ test("artist add accepts a MusicBrainz alias when resolving a provider ID", asyn
       };
     }
     if (endpoint === "/artist" && method === "GET") {
-      return [{ id: 42, foreignArtistId: providerArtistId, artistName: "FromSoftware" }];
+      return [
+        {
+          id: 42,
+          foreignArtistId: providerArtistId,
+          artistName: "FromSoftware",
+          monitored: true,
+        },
+      ];
     }
     if (
       endpoint === `/artist/lookup?term=${encodeURIComponent("FromSoftware")}` &&
@@ -532,6 +822,11 @@ test("artist add succeeds when a provider mapping conflict follows a successful 
     }
     if (endpoint === `/artist/lookup?term=${encodeURIComponent("Muse")}` && method === "GET") {
       return [{ foreignArtistId: providerId, artistName: "Muse" }];
+    }
+    if (endpoint === "/artist" && method === "GET") {
+      return [
+        { id: 42, foreignArtistId: providerId, artistName: "Muse", monitored: true },
+      ];
     }
     throw new Error(`Unexpected Lidarr request: ${method} ${endpoint}`);
   };

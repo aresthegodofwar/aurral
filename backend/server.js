@@ -10,11 +10,15 @@ import dns from "node:dns";
 dns.setDefaultResultOrder("ipv4first");
 
 import { authMiddleware, isProxyAuthEnabled } from "./middleware/auth.js";
+import { createRequestFailureLogger } from "./middleware/requestFailureLogger.js";
 import { handleOidcCallback, isOidcEnabled } from "./services/oidcAuth.js";
 import { handleGoogleCallback } from "./services/googleAuth.js";
 import { logger } from "./services/logger.js";
 import { websocketService } from "./services/websocketService.js";
-import { getAllDownloadStatuses } from "./routes/library/handlers/downloads.js";
+import {
+  getLidarrStatusSnapshot,
+  hasActiveLidarrStatusSnapshot,
+} from "./routes/library/handlers/downloads.js";
 import { getWeeklyFlowStatusSnapshot } from "./services/weeklyFlow/weeklyFlowStatusSnapshot.js";
 
 import settingsRouter from "./routes/settings/index.js";
@@ -37,8 +41,12 @@ import {
 import authRouter from "./routes/auth.js";
 import imageProxyRouter from "./routes/imageProxy.js";
 import lidarrFeedRouter from "./routes/lidarrFeed.js";
+import lidarrWebhookRouter from "./routes/lidarrWebhook.js";
 import inboxRouter from "./routes/inbox.js";
 import newsRouter from "./routes/news.js";
+import subsonicRouter from "./routes/subsonic.js";
+import scrobblingRouter from "./routes/scrobbling.js";
+import playEventsRouter from "./routes/playEvents.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -61,7 +69,22 @@ const allowedCorsOrigins = String(process.env.CORS_ORIGIN || "")
   .map((v) => v.trim())
   .filter(Boolean);
 
+const isSubsonicRequest = (req) => req.path === "/rest" || req.path.startsWith("/rest/");
+const isImageProxyRequest = (req) =>
+  req.path === "/api/image-proxy" || req.path.startsWith("/api/image-proxy/");
+
 function corsMiddleware(req, res, next) {
+  if (isSubsonicRequest(req) || isImageProxyRequest(req)) {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET,HEAD,PUT,PATCH,POST,DELETE");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    if (req.method === "OPTIONS") {
+      res.status(204).end();
+      return;
+    }
+    next();
+    return;
+  }
   if (allowedCorsOrigins.length === 0) {
     if (req.method === "OPTIONS") {
       res.status(403).end();
@@ -112,7 +135,7 @@ if (process.env.OIDC_ENABLED === "true" && !isOidcEnabled()) {
   );
 }
 
-const connectSrcDirectives = ["'self'", "ws:", "wss:", "https://api.github.com"];
+const connectSrcDirectives = ["'self'", "ws:", "wss:", "https://api.github.com", "https://raw.githubusercontent.com"];
 if (process.env.AUTH_PROXY_DOMAIN) {
   connectSrcDirectives.push(process.env.AUTH_PROXY_DOMAIN);
 }
@@ -121,6 +144,7 @@ if (process.env.OIDC_DOMAIN) {
 }
 
 app.use(corsMiddleware);
+app.use(createRequestFailureLogger());
 app.use(
   helmet({
     contentSecurityPolicy: {
@@ -129,36 +153,32 @@ app.use(
         scriptSrc: ["'self'"],
         styleSrc: ["'self'", "'unsafe-inline'"],
         fontSrc: ["'self'", "data:"],
-        imgSrc: [
-          "'self'",
-          "data:",
-          "https://*.deezer.com",
-          "https://*.dzcdn.net",
-          "https://ticketm.net",
-          "https://*.ticketm.net",
-          "https://ticketmaster.com",
-          "https://*.ticketmaster.com",
-          "https://caa.lkly.net",
-          "https://imagecache.lidarr.audio",
-          "https://*.lidarr.audio",
-          "https://archive.org",
-          "https://*.archive.org",
-          "https://*.last.fm",
-          "https://lastfm.freetls.fastly.net",
-          "https://*.fanart.tv",
-        ],
+        imgSrc: ["'self'", "data:", "https:"],
         connectSrc: connectSrcDirectives,
-        mediaSrc: ["'self'", "https://*.dzcdn.net", "https://*.deezer.com"],
+        mediaSrc: ["'self'", "data:", "https://*.dzcdn.net", "https://*.deezer.com"],
         frameSrc: ["'self'", "https://www.youtube-nocookie.com", "https://www.youtube.com"],
         frameAncestors: null,
         upgradeInsecureRequests: null,
       },
     },
-    frameguard: false,
+    frameguard: { action: "sameorigin" },
     crossOriginOpenerPolicy: { policy: "same-origin-allow-popups" },
   }),
 );
+app.use((req, res, next) => {
+  if (isSubsonicRequest(req) || isImageProxyRequest(req)) {
+    res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+  }
+  next();
+});
 app.use(express.json({ limit: JSON_BODY_LIMIT }));
+
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5000,
+});
+
+app.use(limiter);
 
 app.use(authMiddleware);
 
@@ -171,12 +191,6 @@ app.use("/api/auth/oidc/login", authLimiter);
 app.use("/api/auth/oidc/exchange", authLimiter);
 app.use("/api/users/me/password", authLimiter);
 
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 5000,
-});
-app.use("/api/", limiter);
-
 app.use("/api/settings", settingsRouter);
 app.use("/api/onboarding", onboardingRouter);
 app.use("/api/users", usersRouter);
@@ -186,17 +200,21 @@ app.use("/api/library", libraryRouter);
 app.use("/api/discover", discoveryRouter);
 app.use("/api/inbox", inboxRouter);
 app.use("/api/news", newsRouter);
+app.use("/api/webhooks/lidarr", lidarrWebhookRouter);
 app.use("/api/requests", requestsRouter);
 app.use("/api/health", healthRouter);
 app.use("/api/filesystem", filesystemRouter);
 app.use("/api/feeds", lidarrFeedRouter);
 app.use("/api/playlists", weeklyFlowRouter);
 app.use("/api/weekly-flow", (req, res) => {
-  const target = req.originalUrl.replace("/api/weekly-flow", "/api/playlists");
-  res.redirect(308, target);
+  const parsed = new URL(req.originalUrl, "http://localhost");
+  res.redirect(308, `/api/playlists${parsed.pathname}${parsed.search}`);
 });
 app.use("/api/auth", authRouter);
+app.use("/api/scrobbling", scrobblingRouter);
+app.use("/api/play-events", playEventsRouter);
 app.use("/api/image-proxy", imageProxyRouter);
+app.use("/rest", subsonicRouter);
 
 app.get("/sso/callback", async (req, res) => {
   try {
@@ -261,6 +279,7 @@ if (fs.existsSync(frontendDist)) {
 
 app.use((err, req, res, next) => {
   logger.error("system", "Express error:", err || "(no error object)");
+  res.locals.failureLogged = true;
   if (res.headersSent) return next(err);
   if (err?.type === "entity.too.large" || err?.status === 413) {
     return res.status(413).json({
@@ -286,17 +305,19 @@ const broadcastDownloadStatuses = async () => {
   if (downloadStatusBroadcastInFlight) return;
   downloadStatusBroadcastInFlight = true;
   try {
-    if (!hasWsSubscribers("downloads")) return;
-    const { lidarrClient } = await import("./services/lidarrClient.js");
-    if (lidarrClient.isCircuitOpen()) return;
-    const statuses = await getAllDownloadStatuses();
-    const payload = JSON.stringify(statuses);
+    if (!hasWsSubscribers("downloads") && !hasActiveLidarrStatusSnapshot()) return;
+    const snapshot = await getLidarrStatusSnapshot();
+    const message = {
+      type: "download_statuses",
+      statuses: snapshot.statuses,
+      stale: snapshot.stale,
+      error: snapshot.error,
+      updatedAt: snapshot.updatedAt,
+    };
+    const payload = JSON.stringify(message);
     if (payload !== lastDownloadStatusesPayload) {
       lastDownloadStatusesPayload = payload;
-      websocketService.broadcast("downloads", {
-        type: "download_statuses",
-        statuses,
-      });
+      websocketService.broadcast("downloads", message);
     }
   } catch (error) {
     logger.warn("system", "Failed to broadcast download statuses:", { message: error.message });
@@ -373,7 +394,7 @@ const gracefulShutdown = async (signal) => {
   for (const interval of broadcastIntervals) {
     clearInterval(interval);
   }
-  await shutdownHonkerInfrastructure({ timeoutMs: 30000 });
+  await shutdownHonkerInfrastructure({ timeoutMs: 5000 });
   await new Promise((resolve) => {
     httpServer.close(() => resolve());
   });
@@ -391,7 +412,7 @@ process.once("SIGINT", () => {
   void gracefulShutdown("SIGINT");
 });
 
-httpServer.listen(PORT, "::", async () => {
+httpServer.listen(PORT, async () => {
   logger.info("system", `Server running on port ${PORT}`);
   bootstrapHonkerSchedules();
   initializeAppRuntime({ logger });

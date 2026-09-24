@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import http from "node:http";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 import createCache from "../../backend/services/apiClients/simpleCache.js";
@@ -19,6 +20,56 @@ test("rate limiter spaces concurrent request starts", async () => {
   assert.ok(starts[2] - starts[1] >= 20);
 });
 
+test("rate limiter rejects excess queued reservations from a burst", async () => {
+  const limiter = createRateLimiter(20, { maxQueue: 1 });
+  const first = limiter.schedule(() => {});
+  const queued = limiter.schedule(() => {});
+
+  await assert.rejects(
+    limiter.schedule(() => {}),
+    (error) => error.code === "EQUEUEFULL",
+  );
+  await Promise.all([first, queued]);
+});
+
+test("rate limiter expires queued work before invoking its callback", async () => {
+  const limiter = createRateLimiter(30);
+  const first = limiter.schedule(() => {});
+  let invoked = false;
+
+  await assert.rejects(
+    limiter.schedule(
+      () => {
+        invoked = true;
+      },
+      { timeoutMs: 5 },
+    ),
+    (error) => error.code === "ETIMEDOUT",
+  );
+  await first;
+  assert.equal(invoked, false);
+});
+
+test("rate limiter removes aborted queued work", async () => {
+  const limiter = createRateLimiter(30);
+  const first = limiter.schedule(() => {});
+  const controller = new AbortController();
+  let invoked = false;
+
+  const cancelled = limiter.schedule(
+    () => {
+      invoked = true;
+    },
+    { signal: controller.signal },
+  );
+  controller.abort();
+
+  await assert.rejects(cancelled, { name: "AbortError" });
+  await first;
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(invoked, false);
+});
+
 test("TTL cache evicts its oldest entry at the size limit", () => {
   const cache = createCache(300, 2);
   cache.set("first", 1);
@@ -27,6 +78,29 @@ test("TTL cache evicts its oldest entry at the size limit", () => {
   assert.equal(cache.get("first"), undefined);
   assert.equal(cache.get("second"), 2);
   assert.equal(cache.get("third"), 3);
+});
+
+test("TTL cache serves stale values during the configured stale window", () => {
+  let now = 1_000;
+  const cache = createCache(300, 2, { now: () => now });
+  cache.set("album", { id: "album-1" }, 10, 20);
+
+  now += 11_000;
+
+  assert.deepEqual(cache.getWithStale("album"), {
+    value: { id: "album-1" },
+    stale: true,
+  });
+});
+
+test("TTL cache removes values after the stale window", () => {
+  let now = 1_000;
+  const cache = createCache(300, 2, { now: () => now });
+  cache.set("album", { id: "album-1" }, 10, 20);
+
+  now += 31_000;
+
+  assert.equal(cache.getWithStale("album"), undefined);
 });
 
 test("fetch transport failures expose axios-compatible request metadata", async () => {
@@ -43,6 +117,88 @@ test("fetch transport failures expose axios-compatible request metadata", async 
     );
   } finally {
     globalThis.fetch = originalFetch;
+  }
+});
+
+test("fetch timeouts expose an axios-compatible timeout code", async () => {
+  const server = http.createServer((_request, response) => {
+    setTimeout(() => response.end("ok"), 100);
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address();
+
+  try {
+    await assert.rejects(
+      axios.get(`http://127.0.0.1:${port}`, { timeout: 10 }),
+      (error) => error.code === "ECONNABORTED",
+    );
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("uses environment proxy settings when NODE_USE_ENV_PROXY is enabled", async () => {
+  let targetHits = 0;
+  let proxyHits = 0;
+  const target = http.createServer((_request, response) => {
+    targetHits += 1;
+    response.end("direct");
+  });
+  const proxy = http.createServer((_request, response) => {
+    proxyHits += 1;
+    response.end("proxied");
+  });
+  await Promise.all([
+    new Promise((resolve) => target.listen(0, "127.0.0.1", resolve)),
+    new Promise((resolve) => proxy.listen(0, "127.0.0.1", resolve)),
+  ]);
+
+  const saved = Object.fromEntries(
+    ["NODE_USE_ENV_PROXY", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"]
+      .map((name) => [name, process.env[name]]),
+  );
+  const restoreEnvironment = () => {
+    for (const [name, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  };
+
+  try {
+    const proxyUrl = `http://127.0.0.1:${proxy.address().port}`;
+    process.env.NODE_USE_ENV_PROXY = "1";
+    process.env.HTTP_PROXY = proxyUrl;
+    process.env.HTTPS_PROXY = proxyUrl;
+    process.env.http_proxy = proxyUrl;
+    process.env.https_proxy = proxyUrl;
+    process.env.NO_PROXY = "";
+    process.env.no_proxy = "";
+
+    const response = await axios.get(`http://127.0.0.1:${target.address().port}`);
+    assert.equal(response.data, "proxied");
+    assert.equal(proxyHits, 1);
+    assert.equal(targetHits, 0);
+
+    process.env.NO_PROXY = "127.0.0.1";
+    process.env.no_proxy = "127.0.0.1";
+    const noProxyResponse = await axios.get(`http://127.0.0.1:${target.address().port}`);
+    assert.equal(noProxyResponse.data, "direct");
+    assert.equal(proxyHits, 1);
+    assert.equal(targetHits, 1);
+
+    delete process.env.NODE_USE_ENV_PROXY;
+    process.env.NO_PROXY = "";
+    process.env.no_proxy = "";
+    const disabledResponse = await axios.get(`http://127.0.0.1:${target.address().port}`);
+    assert.equal(disabledResponse.data, "direct");
+    assert.equal(proxyHits, 1);
+    assert.equal(targetHits, 2);
+  } finally {
+    restoreEnvironment();
+    await Promise.all([
+      new Promise((resolve) => target.close(resolve)),
+      new Promise((resolve) => proxy.close(resolve)),
+    ]);
   }
 });
 

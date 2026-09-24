@@ -1,5 +1,8 @@
 const SCHEMA_VERSION_KEY = "schemaVersion";
-export const TARGET_SCHEMA_VERSION = 2;
+const V2_SCHEMA_VERSION = 2;
+const V3_SCHEMA_VERSION = 3;
+const V4_SCHEMA_VERSION = 4;
+export const TARGET_SCHEMA_VERSION = V4_SCHEMA_VERSION;
 
 export function getSchemaVersion(db) {
   const row = db
@@ -9,7 +12,7 @@ export function getSchemaVersion(db) {
 }
 
 export function initializeSchemaOnStartup(db, dbHelpers) {
-  return applyV2Migration(db, dbHelpers);
+  return applyV4Migration(db, dbHelpers);
 }
 
 function tableExists(db, name) {
@@ -231,6 +234,85 @@ function ensureSlskdTransferHistoryTable(db) {
     CREATE INDEX IF NOT EXISTS idx_slskd_transfer_history_status ON slskd_transfer_history(status, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_slskd_transfer_history_cleanup ON slskd_transfer_history(cleaned_at, created_at DESC);
   `);
+}
+
+function normalizeMonitorMode(value) {
+  const normalized = String(value || "").trim();
+  return normalized || null;
+}
+
+function ensureLibraryManagementTable(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS library_management (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      entity_kind TEXT NOT NULL,
+      entity_id INTEGER NOT NULL,
+      managed_by TEXT NOT NULL,
+      monitor_mode TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      UNIQUE (entity_kind, entity_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_library_management_entity
+      ON library_management (entity_kind, entity_id);
+    CREATE INDEX IF NOT EXISTS idx_library_management_managed_by
+      ON library_management (managed_by);
+  `);
+}
+
+function backfillJobOwnership(db) {
+  tryAddColumn(db, "ALTER TABLE playlist_download_jobs ADD COLUMN managed_by TEXT");
+  tryAddColumn(db, "ALTER TABLE playlist_download_jobs ADD COLUMN request_group_id TEXT");
+  db.exec(`
+    UPDATE playlist_download_jobs
+    SET managed_by = 'aurral'
+    WHERE managed_by IS NULL OR TRIM(managed_by) = '';
+  `);
+  db.exec(
+    "CREATE INDEX IF NOT EXISTS idx_playlist_download_jobs_request_group ON playlist_download_jobs(request_group_id)",
+  );
+}
+
+function backfillLidarrManagementState(db) {
+  if (!tableExists(db, "library_artists")) {
+    return;
+  }
+  const now = Date.now();
+  const artists = db
+    .prepare("SELECT id, mbid, metadata_json FROM library_artists")
+    .all();
+  if (!artists.length) return;
+  const managedByMbid = tableExists(db, "lidarr_artist_id_map")
+    ? new Set(
+        db
+          .prepare("SELECT musicbrainz_id FROM lidarr_artist_id_map")
+          .all()
+          .map((row) => row.musicbrainz_id),
+      )
+    : new Set();
+  const upsertStmt = db.prepare(`
+    INSERT INTO library_management (entity_kind, entity_id, managed_by, monitor_mode, created_at, updated_at)
+    VALUES ('artist', ?, 'lidarr', ?, ?, ?)
+    ON CONFLICT (entity_kind, entity_id) DO NOTHING
+  `);
+  for (const artist of artists) {
+    let metadata = {};
+    try {
+      metadata = JSON.parse(artist.metadata_json || "{}");
+    } catch {}
+    const mapMatch = artist.mbid && managedByMbid.has(artist.mbid);
+    const indexerMatch = metadata?.librarySource === "lidarr";
+    if (!mapMatch && !indexerMatch) continue;
+    const monitorMode = normalizeMonitorMode(metadata?.monitor || metadata?.addOptions?.monitor);
+    upsertStmt.run(artist.id, monitorMode, now, now);
+  }
+}
+
+export function applyOwnershipMigration(db) {
+  ensureLibraryManagementTable(db);
+  backfillJobOwnership(db);
+  backfillLidarrManagementState(db);
 }
 
 function legacyColumnExpr(columns, columnName, fallback = "NULL") {
@@ -468,23 +550,41 @@ function migrateJobsTable(db) {
   dropLegacyWeeklyFlowJobs(db);
 }
 
-export function applyV2Migration(db, dbHelpers) {
+function applySchemaMigration(db, dbHelpers, targetVersion) {
+  const currentVersion = getSchemaVersion(db);
+  const migrated = currentVersion < targetVersion;
+  if (!migrated) {
+    return { migrated: false, schemaVersion: currentVersion };
+  }
   const upsertSettingStmt = db.prepare(
     "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
   );
-  const currentVersion = getSchemaVersion(db);
-  const migrated = currentVersion < TARGET_SCHEMA_VERSION;
   const run = db.transaction(() => {
     finalizeV2SettingsKeys(db, dbHelpers);
     migrateJobsTable(db);
     ensureSlskdTransferHistoryTable(db);
+    if (targetVersion >= V4_SCHEMA_VERSION) {
+      applyOwnershipMigration(db);
+    }
     if (migrated) {
-      upsertSettingStmt.run(SCHEMA_VERSION_KEY, String(TARGET_SCHEMA_VERSION));
+      upsertSettingStmt.run(SCHEMA_VERSION_KEY, String(targetVersion));
     }
   });
   run();
   return {
-    migrated,
-    schemaVersion: migrated ? TARGET_SCHEMA_VERSION : currentVersion,
+    migrated: true,
+    schemaVersion: targetVersion,
   };
+}
+
+export function applyV2Migration(db, dbHelpers) {
+  return applySchemaMigration(db, dbHelpers, V2_SCHEMA_VERSION);
+}
+
+export function applyV3Migration(db, dbHelpers) {
+  return applySchemaMigration(db, dbHelpers, V3_SCHEMA_VERSION);
+}
+
+export function applyV4Migration(db, dbHelpers) {
+  return applySchemaMigration(db, dbHelpers, V4_SCHEMA_VERSION);
 }

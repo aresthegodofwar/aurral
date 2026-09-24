@@ -2,7 +2,7 @@ import fs from "fs/promises";
 import path from "path";
 import { parseFile } from "music-metadata";
 import { dbOps } from "../db/helpers/index.js";
-import { resolvePlaylistRoot, isPathInsideRoot, PLAYLIST_LIBRARY_DIR } from "./playlistPaths.js";
+import { resolvePlaylistRoot, isPathInsideRoot } from "./playlistPaths.js";
 import { getEnabledDownloadSources } from "./downloadSourceService.js";
 import { downloadTracker } from "./weeklyFlow/weeklyFlowDownloadTracker.js";
 import {
@@ -22,8 +22,7 @@ export function getQualityProfile() {
 
 export function isAurralOwnedPath(filePath) {
   if (!filePath) return false;
-  const libraryRoot = path.join(resolvePlaylistRoot(), PLAYLIST_LIBRARY_DIR);
-  return isPathInsideRoot(path.resolve(filePath), path.resolve(libraryRoot));
+  return isPathInsideRoot(path.resolve(filePath), path.resolve(resolvePlaylistRoot()));
 }
 
 export function decorateJobQuality(job, profile = getQualityProfile()) {
@@ -129,10 +128,10 @@ export async function reclassifyQualityJobs({ enqueue = false } = {}) {
   return { classified, queued };
 }
 
+const UPGRADE_SOURCE_IDS = new Set(["slskd", "usenet", "deemix"]);
+
 function hasUpgradeSource() {
-  return getEnabledDownloadSources().some(
-    (source) => source.id === "slskd" || source.id === "usenet",
-  );
+  return getEnabledDownloadSources().some((source) => UPGRADE_SOURCE_IDS.has(source.id));
 }
 
 export async function queueQualityUpgrade(job) {
@@ -148,11 +147,14 @@ export async function queueQualityUpgrade(job) {
   if (downloadTracker.findActiveUpgradeJob(current)) return "already-queued";
   const upgradeJobId = downloadTracker.addUpgradeJob(current);
   if (!upgradeJobId) return "ineligible";
+  const queuedUpgrade = downloadTracker.getJob(upgradeJobId);
   if (!downloadTracker.enqueueDownloadPipeline(upgradeJobId)) {
     downloadTracker.removeJob(upgradeJobId);
     return "ineligible";
   }
   downloadTracker.markQualityUpgradeChecked(current.id);
+  const { recordTrackJobQueued } = await import("./aurralHistoryService.js");
+  recordTrackJobQueued(queuedUpgrade);
   return "queued";
 }
 
@@ -199,7 +201,10 @@ export async function finalizeQualityUpgradeSuccess(upgradeJob, finalPath, quali
   for (const playlistId of playlistIds) await playlistManager.refreshPlaylist(playlistId);
   playlistManager.scheduleScanLibrary();
   if (oldPath !== finalPath && isAurralOwnedPath(oldPath)) {
-    await fs.rm(oldPath, { force: true }).catch(() => {});
+    const { createPlaybackDeletionGuard } = await import("./playback/playbackFileRetention.js");
+    if (await createPlaybackDeletionGuard().canDelete(oldPath)) {
+      await fs.rm(oldPath, { force: true }).catch(() => {});
+    }
   }
   const { recordTrackJobActivity } = await import("./aurralHistoryService.js");
   recordTrackJobActivity({

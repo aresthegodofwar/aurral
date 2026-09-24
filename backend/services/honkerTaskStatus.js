@@ -10,6 +10,20 @@ export const QUEUE_DEFINITIONS = [
     worker: "system-task",
   },
   {
+    queue: "system-task-maintenance",
+    label: "Background Maintenance",
+    workerLabel: "Background Maintenance Worker",
+    description: "Runs cleanup, news refreshes, and playlist schedule checks.",
+    worker: "system-task-maintenance",
+  },
+  {
+    queue: "system-task-inbox",
+    label: "Inbox Refreshes",
+    workerLabel: "Inbox Refresh Worker",
+    description: "Refreshes inbox content outside the web process.",
+    worker: "system-task-inbox",
+  },
+  {
     queue: "weekly-flow-operation",
     label: "Playlist Operations",
     workerLabel: "Playlist Operation Worker",
@@ -167,7 +181,7 @@ const PAYLOAD_DETAIL_KEY = {
       : "Scans playlists for tracks missing MusicBrainz IDs and queues enrichment jobs.",
   "library-scan": (p, desc) =>
     p?.force
-      ? "Refreshes Aurral's library view after startup or a forced scan."
+      ? "Refreshes Aurral's library view after a requested refresh."
       : desc,
   "discovery-user-refresh": (p, desc) =>
     p?.listenHistoryProfile?.listenHistoryUsername
@@ -390,7 +404,8 @@ export function describeHonkerTask(queue, payloadValue) {
   const payload = parsePayload(payloadValue) || {};
   const safeQueue = String(queue || "").trim();
 
-  if (safeQueue === "system-task")
+  if (safeQueue === "system-task" || safeQueue === "system-task-maintenance" ||
+      safeQueue === "system-task-inbox")
     return systemTaskInfo(String(payload?.kind || "").trim()).label;
   if (safeQueue === "discovery-refresh") return discoveryRefreshInfo(payload).label;
   if (safeQueue === "_outbox:notifications")
@@ -415,7 +430,8 @@ function describeHonkerTaskDetail(queue, payloadValue) {
   const payload = parsePayload(payloadValue) || {};
   const safeQueue = String(queue || "").trim();
 
-  if (safeQueue === "system-task")
+  if (safeQueue === "system-task" || safeQueue === "system-task-maintenance" ||
+      safeQueue === "system-task-inbox")
     return systemTaskInfo(String(payload?.kind || "").trim()).description;
   if (safeQueue === "discovery-refresh") return discoveryRefreshInfo(payload).description;
 
@@ -430,7 +446,8 @@ function summarizePayload(queue, payloadValue) {
     return "";
   }
 
-  if (queue === "system-task") {
+  if (queue === "system-task" || queue === "system-task-maintenance" ||
+      queue === "system-task-inbox") {
     return "";
   }
 
@@ -732,6 +749,43 @@ function readLiveJobs() {
   );
 }
 
+function readLiveJobStats() {
+  const currentTime = nowUnix();
+  return safeQuery(
+    `
+      SELECT queue,
+             COUNT(*) AS live_count,
+             SUM(CASE WHEN state = 'processing' THEN 1 ELSE 0 END) AS running_count,
+             SUM(CASE
+                   WHEN state != 'processing' AND COALESCE(run_at, 0) > ? THEN 1
+                   ELSE 0
+                 END) AS scheduled_count,
+             SUM(CASE
+                   WHEN state != 'processing' AND COALESCE(run_at, 0) <= ? THEN 1
+                   ELSE 0
+                 END) AS queued_count,
+             MIN(CASE
+                   WHEN state != 'processing' AND COALESCE(run_at, 0) > ? THEN run_at
+                   ELSE NULL
+                 END) AS next_run_at
+      FROM _honker_live
+      GROUP BY queue
+    `,
+    [currentTime, currentTime, currentTime],
+  );
+}
+
+function readScheduledLiveJobs() {
+  return safeQuery(
+    `
+      SELECT queue, payload, run_at
+      FROM _honker_live
+      WHERE state != 'processing' AND COALESCE(run_at, 0) > ?
+    `,
+    [nowUnix()],
+  );
+}
+
 function readDeadJobs() {
   const cutoff = getRunLedgerCutoffUnix();
   return safeQuery(
@@ -747,7 +801,7 @@ function readDeadJobs() {
   );
 }
 
-function readQueueStats(liveRows = []) {
+function readQueueStats(liveRows = [], liveStats = [], scheduledRows = []) {
   const currentTime = nowUnix();
   const deadStats = safeQuery(
     `
@@ -817,6 +871,22 @@ function readQueueStats(liveRows = []) {
       entry.queuedCount += 1;
     }
   }
+  for (const row of scheduledRows) {
+    const entry = ensure(row.queue);
+    const runAt = Number(row.run_at || 0);
+    entry.scheduledKeys.add(taskMatchKey(row.queue, parsePayload(row.payload)));
+    if (!entry.nextRunAt || runAt < Number(Date.parse(entry.nextRunAt) / 1000)) {
+      entry.nextRunAt = unixToIso(runAt);
+    }
+  }
+  for (const row of liveStats) {
+    const entry = ensure(row.queue);
+    entry.liveCount = Number(row.live_count || 0);
+    entry.runningCount = Number(row.running_count || 0);
+    entry.queuedCount = Number(row.queued_count || 0);
+    entry.scheduledCount = Number(row.scheduled_count || 0);
+    entry.nextRunAt = row.next_run_at ? unixToIso(row.next_run_at) : null;
+  }
   for (const row of deadStats) {
     ensure(row.queue).failedCount = Number(row.failed_count || 0);
   }
@@ -835,7 +905,10 @@ function readQueueStats(liveRows = []) {
 async function readWorkerStatuses() {
   try {
     const { getHonkerWorkerStatuses } = await import("./honkerWorkerRuntime.js");
-    return getHonkerWorkerStatuses();
+    const { getIsolatedWorkerStatuses } = await import("./appRuntime.js");
+    const statuses = new Map(getHonkerWorkerStatuses().map((worker) => [worker.name, worker]));
+    for (const worker of getIsolatedWorkerStatuses()) statuses.set(worker.name, worker);
+    return [...statuses.values()];
   } catch {
     return [];
   }
@@ -1142,10 +1215,12 @@ export async function getHonkerTaskStatus() {
   const scheduledRows = readScheduledRows();
   const latestRunsByTask = readLatestRunsByTask();
   const liveRows = readLiveJobs();
+  const liveStats = readLiveJobStats();
+  const scheduledLiveRows = readScheduledLiveJobs();
   const deadRows = readDeadJobs();
   const runRows = readRecentRuns();
   const runningStartsByJobId = readRunningStartsByJobId();
-  const queueStats = readQueueStats(liveRows);
+  const queueStats = readQueueStats(liveRows, liveStats, scheduledLiveRows);
   const workerStatuses = await readWorkerStatuses();
   const workers = normalizeWorkerRows(workerStatuses, queueStats);
   const queue = normalizeQueueRows(liveRows, deadRows, runRows, runningStartsByJobId);

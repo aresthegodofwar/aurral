@@ -12,6 +12,7 @@ import { AdminPlexLinkField } from "./AdminPlexLinkField";
 import { PlexSelfLinkSection } from "./PlexSelfLinkSection";
 import { isReauthRequiredError, promptReauth } from "../../../utils/reauth.js";
 import { useAuth } from "../../../contexts/AuthContext";
+import { DotLoader } from "../../../components/DotLoader";
 function getLocalBypassStatus(status) {
   if (!status) {
     return {
@@ -80,12 +81,8 @@ function getLocalBypassStatus(status) {
 }
 
 function formatListenHistory(user) {
-  if (!user.listenHistoryUsername && !user.listenHistoryUrl) {
-    return "—";
-  }
-  if (user.listenHistoryProvider === "koito") {
-    return `Koito: ${user.listenHistoryUrl}`;
-  }
+  if (!user.listenHistoryUsername && !user.listenHistoryUrl) return "—";
+  if (user.listenHistoryProvider === "koito") return `Koito: ${user.listenHistoryUrl}`;
   const provider = user.listenHistoryProvider === "listenbrainz" ? "ListenBrainz" : "Last.fm";
   return `${provider}: ${user.listenHistoryUsername}`;
 }
@@ -216,7 +213,7 @@ export function SettingsUsersTab({
   return (
     <div className="arr-page">
       {authUser?.role !== "admin" ? (
-        <SettingsArrFieldSet legend="Change Password">
+        <SettingsArrFieldSet legend="Change password">
           <form
             className="arr-form"
             onSubmit={async (event) => {
@@ -302,6 +299,7 @@ export function SettingsUsersTab({
                   changePwNew !== changePwConfirm
                 }
               >
+                {changingPassword ? <DotLoader size="sm" label={null} /> : null}
                 {changingPassword ? "Changing…" : "Change password"}
               </button>
             </div>
@@ -309,7 +307,7 @@ export function SettingsUsersTab({
         </SettingsArrFieldSet>
       ) : (
         <>
-          <SettingsArrFieldSet legend="Local Network Auto-login">
+          <SettingsArrFieldSet legend="Local network auto-login">
             <SettingsArrFormGroup
               label="Auto-login"
               help={`${localBypassStatus.title}. ${localBypassStatus.detail}`}
@@ -400,7 +398,9 @@ export function SettingsUsersTab({
                 <tbody>
                   {loadingUsers ? (
                     <tr className="arr-table__empty-row">
-                      <td colSpan={6}>Loading users…</td>
+                      <td colSpan={6}>
+                        <DotLoader size="sm" label={null} /> Loading users…
+                      </td>
                     </tr>
                   ) : usersList.length === 0 ? (
                     <tr className="arr-table__empty-row">
@@ -417,7 +417,7 @@ export function SettingsUsersTab({
                                 className={`arr-badge${
                                   user.allowIdentityAdoption ? " arr-badge--warning" : ""
                                 }`}
-                                title={
+                                aria-label={
                                   user.allowIdentityAdoption
                                     ? "Approved for adoption. The next matching SSO sign-in will claim this account."
                                     : "This account predates SSO identity linking and has no linked identity. If it belongs to an SSO user, approve it for adoption from Manage."
@@ -539,7 +539,7 @@ export function SettingsUsersTab({
                         </button>
                         <button
                           type="button"
-                          className="arr-btn arr-btn--primary"
+                          className="arr-btn btn-danger"
                           disabled={deletingUser}
                           onClick={async () => {
                             setDeletingUser(true);
@@ -556,6 +556,7 @@ export function SettingsUsersTab({
                             }
                           }}
                         >
+                          {deletingUser ? <DotLoader size="sm" label={null} /> : null}
                           {deletingUser ? "Deleting…" : "Delete"}
                         </button>
                       </div>
@@ -670,6 +671,7 @@ export function SettingsUsersTab({
                             className="arr-btn arr-btn--primary"
                             disabled={creatingUser}
                           >
+                            {creatingUser ? <DotLoader size="sm" label={null} /> : null}
                             {creatingUser ? "Creating…" : "Create user"}
                           </button>
                         </div>
@@ -862,7 +864,7 @@ export function SettingsUsersTab({
                                 </SettingsArrFormGroup>
                               ) : null}
                               <SettingsArrFormGroup
-                                label="Plex Account"
+                                label="Plex account"
                                 help="Link this user to a Plex Home managed user so their flow and playlists are created under that Plex account."
                               >
                                 <AdminPlexLinkField
@@ -892,6 +894,7 @@ export function SettingsUsersTab({
                             className="arr-btn arr-btn--primary"
                             disabled={savingEdit}
                           >
+                            {savingEdit ? <DotLoader size="sm" label={null} /> : null}
                             {savingEdit ? "Saving…" : "Save"}
                           </button>
                         </div>

@@ -9,7 +9,7 @@ When you configure Ticketmaster, Discover also shows nearby events.
 
 ![Aurral Discover page](../../../assets/screenshots/discover.webp)
 
-Discover uses your library data. Aurral tries to recommend artists that fit your taste but are not in your library.
+Discover uses your Lidarr library, listening history, and discovery data. Aurral tries to recommend artists that fit your taste but are not in your canonical Library.
 
 ## What shapes recommendations
 
@@ -44,15 +44,21 @@ When **News** is enabled in **Settings > RSS News**, Discover shows recent stori
 
 Select the arrow on the **Artist News** section, or **News** in the sidebar, to open the full news page. Aurral refreshes enabled RSS feeds in the background and keeps recent results in the local database. If a feed does not provide an article photo, Aurral uses the available image fallback. Select the disable icon beside an article's publisher to turn that RSS feed off in **Settings > RSS News**.
 
+Select a library artist or album from a Discover card to open its canonical Library page. From there, you can play available tracks, mark items as favorites, and open the full metadata page when you need release details.
+
 ## Discover playlists
 
 Aurral can generate playlists such as Release Radar from your listening context. These playlists appear in Discover.
 
-You can add them to your Playlists library for downloads and playback.
+You can adopt them as a Flow or a static playlist for downloads and playback. An adopted playlist belongs to the user who created it.
+
+Open an editorial playlist to play the Deezer previews available for its tracks.
 
 ## Per-user listening history
 
-Each user sets a listening-history provider in **Profile**. Enter a Last.fm username, ListenBrainz username, or Koito instance URL.
+Each user sets a listening-history provider in **Profile**. Select **Local only**, enter a Last.fm
+or ListenBrainz username, or enter a Koito instance URL. Aurral uses local play events for every
+profile and adds external history when the selected provider supplies it.
 
 Aurral uses this value to make personal recommendations on a shared instance.
 

@@ -3,7 +3,6 @@ import { Navigate, useParams } from "react-router-dom";
 import { useToast } from "../../contexts/ToastContext";
 import { useAuth } from "../../contexts/AuthContext";
 import { useDocumentTitle } from "../../hooks/useDocumentTitle";
-import SettingsMetadataSponsorSection from "../../components/SettingsMetadataSponsorSection";
 import { useSettingsData } from "./hooks/useSettingsData";
 import { useSettingsTabs } from "./hooks/useSettingsTabs";
 import { useSettingsUsers } from "./hooks/useSettingsUsers";
@@ -21,6 +20,7 @@ import { SettingsRssNewsTab } from "./components/SettingsRssNewsTab";
 import { SettingsDiscoverTab } from "./components/SettingsDiscoverTab";
 import { SettingsUsersTab } from "./components/SettingsUsersTab";
 import { SettingsMetadataTab } from "./components/SettingsMetadataTab";
+import { DotLoader } from "../../components/DotLoader";
 import { DEFAULT_SETTINGS_TAB, normalizeSettingsTabId } from "./settingsTabsConfig";
 import "./settingsArr.css";
 
@@ -29,10 +29,8 @@ function SettingsPage() {
   const { user: authUser } = useAuth();
   const { tab: tabParam } = useParams();
 
-  const data = useSettingsData(showSuccess, showError, showInfo);
-
   const tabs = useSettingsTabs(authUser);
-
+  const data = useSettingsData(showSuccess, showError, showInfo, tabs.activeTab);
   const users = useSettingsUsers(authUser, showSuccess, showError, tabs.activeTab);
 
   const normalizedParam = normalizeSettingsTabId(tabParam);
@@ -92,20 +90,13 @@ function SettingsPage() {
                 health={data.health}
                 lidarrRootFolders={data.lidarrRootFolders}
                 loadingLidarrRootFolders={data.loadingLidarrRootFolders}
-                setLoadingLidarrRootFolders={data.setLoadingLidarrRootFolders}
-                setLidarrRootFolders={data.setLidarrRootFolders}
                 lidarrProfiles={data.lidarrProfiles}
                 loadingLidarrProfiles={data.loadingLidarrProfiles}
-                setLoadingLidarrProfiles={data.setLoadingLidarrProfiles}
-                setLidarrProfiles={data.setLidarrProfiles}
                 lidarrMetadataProfiles={data.lidarrMetadataProfiles}
                 loadingLidarrMetadataProfiles={data.loadingLidarrMetadataProfiles}
-                setLoadingLidarrMetadataProfiles={data.setLoadingLidarrMetadataProfiles}
-                setLidarrMetadataProfiles={data.setLidarrMetadataProfiles}
                 lidarrTags={data.lidarrTags}
                 loadingLidarrTags={data.loadingLidarrTags}
-                setLoadingLidarrTags={data.setLoadingLidarrTags}
-                setLidarrTags={data.setLidarrTags}
+                refreshLidarrResources={data.refreshLidarrResources}
                 testingLidarr={data.testingLidarr}
                 setTestingLidarr={data.setTestingLidarr}
                 applyingCommunityGuide={data.applyingCommunityGuide}
@@ -139,6 +130,7 @@ function SettingsPage() {
             <form onSubmit={data.handleSaveSettings} className="arr-form" autoComplete="off">
               <SettingsDownloadClientsSection
                 settings={data.settings}
+                downloadClientSettings={data.downloadClientSettings}
                 updateSettings={data.updateSettings}
                 health={data.health}
                 handleSaveSettings={data.handleSaveSettings}
@@ -155,6 +147,7 @@ function SettingsPage() {
         return (
           <SettingsPlaybackTab
             settings={data.settings}
+            playbackSettings={data.playbackSettings}
             updateSettings={data.updateSettings}
             hasUnsavedChanges={data.hasUnsavedChanges}
             saving={data.saving}
@@ -206,16 +199,13 @@ function SettingsPage() {
         );
       case "metadata":
         return (
-          <>
-            <SettingsMetadataSponsorSection />
-            <SettingsMetadataTab
-              settings={data.settings}
-              updateSettings={data.updateSettings}
-              health={data.health}
-              handleSaveSettings={data.handleSaveSettings}
-              hidePanelHeader
-            />
-          </>
+          <SettingsMetadataTab
+            settings={data.settings}
+            updateSettings={data.updateSettings}
+            health={data.health}
+            handleSaveSettings={data.handleSaveSettings}
+            hidePanelHeader
+          />
         );
       case "users":
         return (
@@ -290,6 +280,20 @@ function SettingsPage() {
     return <Navigate to={`/settings/${normalizedParam}`} replace />;
   }
 
+  if (!data.settingsLoaded) {
+    return (
+      <div className="settings-arr">
+        <div className="settings-arr__body">
+          <div className="settings-arr__content">
+            <p className="settings-page__muted-copy">
+              <DotLoader size="sm" label={null} /> Loading settings…
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <>
       <CommunityGuideModal
@@ -301,6 +305,23 @@ function SettingsPage() {
       <div className="settings-arr">
         <div className="settings-arr__body">
           <div className="settings-arr__content">
+            <header className="settings-arr__header">
+              <div className="settings-arr__heading">
+                <p className="settings-arr__eyebrow">Settings</p>
+                <h1 className="settings-arr__title">{tabs.activeTabMeta?.label || "Settings"}</h1>
+              </div>
+              {tabs.activeTab !== "tasks" ? (
+                <div
+                  className={`settings-arr__save-state${data.saving ? " is-saving" : ""}`}
+                  role="status"
+                  aria-live="polite"
+                  aria-busy={data.saving}
+                  aria-hidden={!data.saving}
+                >
+                  {data.saving ? <><DotLoader size="sm" label={null} /> Saving…</> : null}
+                </div>
+              ) : null}
+            </header>
             <SettingsMobileNav
               tabs={tabs.tabs}
               activeTab={tabs.activeTab}

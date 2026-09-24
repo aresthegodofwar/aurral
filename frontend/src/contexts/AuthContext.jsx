@@ -11,7 +11,9 @@ import {
   loginApi,
   logoutApi,
 } from "../utils/api/endpoints/auth.js";
+import { clearLibraryFavoritesCache } from "../utils/api/endpoints/library.js";
 import { setDateTimeFormat } from "../utils/dateTime.js";
+import { queryClient } from "../queryClient.js";
 
 const AuthContext = createContext(null);
 
@@ -65,6 +67,7 @@ export const AuthProvider = ({ children }) => {
               changeMonitoring: true,
               deleteArtist: true,
               deleteAlbum: true,
+              deleteTrack: true,
             },
           },
         );
@@ -113,6 +116,8 @@ export const AuthProvider = ({ children }) => {
       const result = await loginApi(normalizedUsername, password);
       if (!result?.token) return false;
       authResolvedRef.current = true;
+      clearLibraryFavoritesCache();
+      queryClient.clear();
       setStoredAuth({ token: result.token });
       setUser(result.user || null);
       setIsAuthenticated(true);
@@ -132,6 +137,8 @@ export const AuthProvider = ({ children }) => {
     if (externalLogoutUrl) {
       void logoutApi().catch(() => {});
       clearAuthStorage();
+      clearLibraryFavoritesCache();
+      queryClient.clear();
       invalidateBootstrapCache();
       window.location.href = externalLogoutUrl;
       return;
@@ -141,6 +148,8 @@ export const AuthProvider = ({ children }) => {
       await logoutApi();
     } catch {}
     clearAuthStorage();
+    clearLibraryFavoritesCache();
+    queryClient.clear();
     invalidateBootstrapCache();
     setIsAuthenticated(false);
     setUser(null);

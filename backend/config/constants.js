@@ -23,13 +23,15 @@ export const normalizeDateTimeFormat = (value) =>
 export const defaultData = {
   settings: {
     dateTimeFormat: "browser",
+    subsonic: {
+      favoriteAutoKeep: true,
+    },
     integrations: {
       navidrome: {
         url: "",
         username: "",
         password: "",
-        m3uPathMode: "local",
-        pathMappings: [],
+        prefixOwnerUsername: true,
       },
       plex: {
         url: "",
@@ -40,9 +42,14 @@ export const defaultData = {
         plexUsername: "",
         mainLibrarySectionId: "",
       },
+      jellyfin: {
+        url: "",
+        apiKey: "",
+        userId: "",
+      },
       lastfm: {
         apiKey: "",
-        username: "",
+        apiSecret: "",
         discoveryPeriod: "1month",
         discoveryAutoRefreshHours: 168,
         discoveryRecommendationsPerRefresh: 200,
@@ -89,6 +96,12 @@ export const defaultData = {
         priority: 50,
         stagingPath: "",
       },
+      deemix: {
+        enabled: false,
+        url: "",
+        bitrate: 9,
+        priority: 15,
+      },
       ticketmaster: {
         apiKey: "",
         searchRadiusMiles: 250,
@@ -103,11 +116,14 @@ export const defaultData = {
         url: "",
         externalUrl: "",
         apiKey: "",
+        rootFolderPath: null,
+        rootFolderPaths: [],
         qualityProfileId: null,
         metadataProfileId: null,
         tagId: null,
         defaultMonitorOption: "none",
         searchOnAdd: false,
+        availableOnly: true,
       },
       metadata: {
         provider: "brainzmash",

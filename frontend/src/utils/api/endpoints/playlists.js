@@ -3,10 +3,9 @@ import {
   postData,
   putData,
   deleteData,
-  fetchInflightOnce,
   buildAuthenticatedApiUrl,
-  flowStatusInflight,
 } from "../core.js";
+import { queryClient, queryKeys } from "../../../queryClient.js";
 
 export const getFlowTrackStreamUrl = (jobId) =>
   buildAuthenticatedApiUrl(`/playlists/stream/${encodeURIComponent(jobId)}`);
@@ -14,7 +13,7 @@ export const getFlowTrackStreamUrl = (jobId) =>
 export const getStagingStreamUrl = (jobId) =>
   buildAuthenticatedApiUrl(`/playlists/staging-stream/${encodeURIComponent(jobId)}`);
 
-export const getFlowArtworkUrl = (playlistId, version) =>
+export const getFlowArtworkUrl = (playlistId, version = "current") =>
   buildAuthenticatedApiUrl(
     `/playlists/artwork/${encodeURIComponent(playlistId)}`,
     { v: version },
@@ -41,10 +40,13 @@ export const generateFlowArtwork = (playlistId) =>
     `/playlists/artwork/${encodeURIComponent(playlistId)}/generate`,
   );
 
-export const getFlowStatus = async ({ signal } = {}) => {
-  return fetchInflightOnce(flowStatusInflight, "flowStatus", () =>
-    getData("/playlists/status", { signal }),
-  );
+export const getFlowStatus = ({ signal, bypassCache = false } = {}) => {
+  if (bypassCache) return getData("/playlists/status", { signal });
+  return queryClient.fetchQuery({
+    queryKey: queryKeys.playlistStatus,
+    queryFn: ({ signal: querySignal }) => getData("/playlists/status", { signal: querySignal }),
+    staleTime: 4_000,
+  });
 };
 
 export const getFlowJobs = (flowId, limit = null, options = {}) => {
@@ -58,6 +60,12 @@ export const getFlowJobs = (flowId, limit = null, options = {}) => {
     params,
   });
 };
+
+export const getAllFlowJobs = (options = {}) =>
+  getData("/playlists/jobs", options);
+
+export const reSearchAllMissingTracks = () =>
+  postData("/playlists/research-missing");
 
 export const createFlow = (payload) => postData("/playlists/flows", payload);
 
@@ -91,6 +99,12 @@ export const updateSharedPlaylist = (playlistId, payload) =>
     `/playlists/shared-playlists/${playlistId}`,
     payload,
   );
+
+export const setPlaylistTrackAvailability = (playlistId, enabled) =>
+  putData(`/playlists/shared-playlists/${encodeURIComponent(playlistId)}/track-availability`, { enabled });
+
+export const setPlaylistRecordHistory = (playlistId, enabled) =>
+  putData(`/playlists/shared-playlists/${encodeURIComponent(playlistId)}/record-history`, { enabled });
 
 export const addSharedPlaylistTracks = (playlistId, payload) =>
   postData(
@@ -131,6 +145,8 @@ export const searchTrackUpgrade = (playlistId, jobId) =>
 export const searchPlaylistUpgrades = (playlistId) =>
   postData(`/playlists/quality-upgrades/${encodeURIComponent(playlistId)}`);
 
+export const searchAllUpgrades = () => postData("/playlists/quality-upgrades");
+
 export const approveBlockedJob = (jobId) =>
   postData(`/playlists/jobs/${jobId}/approve`);
 
@@ -160,8 +176,36 @@ export const previewSpotifyPlaylist = (playlistId) =>
 export const importSpotifyPlaylist = (payload) =>
   postData("/playlists/import/spotify", payload);
 
+export const getListenBrainzPlaylists = () =>
+  getData("/playlists/import/listenbrainz/playlists");
+
+export const previewListenBrainzPlaylist = (playlistId, playlistType = null) =>
+  postData("/playlists/import/listenbrainz/preview", {
+    playlistId,
+    ...(playlistType ? { playlistType } : {}),
+  });
+
+export const importListenBrainzPlaylist = (payload) =>
+  postData("/playlists/import/listenbrainz", payload);
+
+export const getLastfmPlaylists = (username = "") =>
+  getData("/playlists/import/lastfm/playlists", {
+    params: username ? { username } : undefined,
+  });
+
+export const previewLastfmPlaylist = (playlistId, username = "") =>
+  postData("/playlists/import/lastfm/preview", {
+    playlistId,
+    username,
+  });
+
+export const importLastfmPlaylist = (payload) =>
+  postData("/playlists/import/lastfm", payload);
+
 export const syncSharedPlaylistImport = (playlistId) =>
-  postData(`/playlists/shared-playlists/${encodeURIComponent(playlistId)}/sync`);
+  postData(`/playlists/shared-playlists/${encodeURIComponent(playlistId)}/sync`, undefined, {
+    timeout: 5 * 60 * 1000,
+  });
 
 export const getFlowLidarrImportListUrl = (flowId) =>
   getData(`/playlists/flows/${encodeURIComponent(flowId)}/lidarr-import-list`);

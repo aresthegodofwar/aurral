@@ -1,14 +1,18 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
-import { readLibraryLookupCache, lookupArtistsInLibraryBatch } from "../utils/api/endpoints/library.js";
+import {
+  lookupArtistInLibrary,
+  lookupArtistsInLibraryBatch,
+  readLibraryLookupCache,
+} from "../utils/api/endpoints/library.js";
 import { getMyDiscoverLayout, updateMyDiscoverLayout } from "../utils/api/endpoints/auth.js";
 
 import { useDiscoverNavigation } from "../hooks/useDiscoverNavigation";
 import {
-  Loader,
   Music,
   Sparkles,
   LayoutTemplate,
 } from "lucide-react";
+import { DotLoader } from "../components/DotLoader";
 import DiscoveryStatusPill from "../components/DiscoveryStatusPill";
 import { useDocumentTitle } from "../hooks/useDocumentTitle";
 import { useAuth } from "../contexts/AuthContext";
@@ -36,6 +40,7 @@ import {
 import { useDiscoverData } from "./useDiscoverData";
 import { useLibraryNews } from "../hooks/useLibraryNews";
 import { formatDate } from "../utils/dateTime.js";
+import TooltipButton from "../components/TooltipButton";
 const getArtistId = (artist) => getArtistRecordId(artist);
 
 function DiscoverPage() {
@@ -67,6 +72,7 @@ function DiscoverPage() {
     nearbyShowsLoading,
     nearbyShowsError,
     nearbyLocationMode,
+    appliedNearbyCountry,
     setNearbyLocationMode,
     appliedNearbyZip,
     setAppliedNearbyZip,
@@ -379,6 +385,24 @@ function DiscoverPage() {
     [navigate],
   );
 
+  const handleOpenArtistInLibrary = useCallback(
+    async (artist) => {
+      const artistId = getArtistId(artist);
+      if (!artistId) return;
+      try {
+        const lookup = await lookupArtistInLibrary(artistId);
+        const canonicalId = lookup?.artist?.canonicalId;
+        if (!canonicalId) throw new Error("Library artist was not found");
+        navigate(`/library/artist/${encodeURIComponent(canonicalId)}`);
+        return true;
+      } catch (requestError) {
+        showError(requestError?.message || "Failed to open artist in library");
+        return false;
+      }
+    },
+    [navigate, showError],
+  );
+
   const discoverArtistIds = useMemo(() => {
     const ids = new Set();
     for (const artist of data?.recommendations || []) {
@@ -471,6 +495,7 @@ function DiscoverPage() {
                   isInLibrary={!!libraryLookup[getArtistId(artist)]}
                   canAddArtist={canAddArtist}
                   onNavigate={navigate}
+                  onOpenInLibrary={handleOpenArtistInLibrary}
                   onAddToLibrary={handleAddArtistToLibrary}
                   onFeedback={handleDiscoveryFeedback}
                   feedbackUsed={getArtistFeedbackFlags(artistFeedbackLookup, artist)}
@@ -503,6 +528,7 @@ function DiscoverPage() {
                     isInLibrary={!!libraryLookup[artistId]}
                     canAddArtist={false}
                     onNavigate={navigate}
+                    onOpenInLibrary={handleOpenArtistInLibrary}
                     artist={{
                       id: artistId,
                       name: artist.artistName,
@@ -572,7 +598,7 @@ function DiscoverPage() {
         >
           {newsLoading && newsArticles.length === 0 ? (
             <div className="discover-news-rail-status artist-discover-shelf-card--news-status">
-              Checking recent stories…
+              <DotLoader size="sm" label={null} /> Checking recent stories…
             </div>
           ) : newsArticles.length > 0 ? (
             newsArticles.slice(0, 12).map((article) => (
@@ -599,7 +625,7 @@ function DiscoverPage() {
         return (
           <DiscoverRail
             key="recommended"
-            title="Recommended for You"
+            title="Recommended"
             onViewAll={() => navigate("/search?type=recommended")}
           >
             <>
@@ -610,6 +636,7 @@ function DiscoverPage() {
                     isInLibrary={!!libraryLookup[getArtistId(artist)]}
                     canAddArtist={canAddArtist}
                     onNavigate={navigate}
+                    onOpenInLibrary={handleOpenArtistInLibrary}
                     onAddToLibrary={handleAddArtistToLibrary}
                     onFeedback={handleDiscoveryFeedback}
                     feedbackUsed={getArtistFeedbackFlags(artistFeedbackLookup, artist)}
@@ -627,13 +654,13 @@ function DiscoverPage() {
         <section key="recommended" className="artist-discover-section">
           <h2 className="artist-section-title--discover discover-recommended-status__title">
             <span className="artist-section-title--discover-mobile">Recommended</span>
-            <span className="artist-section-title--discover-desktop">Recommended for You</span>
+            <span className="artist-section-title--discover-desktop">Recommended</span>
           </h2>
           <div
             className={`discover-recommended-status${isUpdating ? " discover-recommended-status--loading" : ""}`}
           >
             {isUpdating ? (
-              <Loader className="discover-recommended-status__spinner animate-spin" />
+              <DotLoader size="2xl" label={null} className="discover-recommended-status__loader" />
             ) : (
               <div className="discover-recommended-status__icon" aria-hidden="true">
                 <Music className="artist-icon-lg" />
@@ -646,14 +673,9 @@ function DiscoverPage() {
                   ? "Not enough listening data yet"
                   : "Connect Last.fm"}
             </h3>
-            <p className="discover-recommended-status__message">
-              {isUpdating
-                ? updateProgressMessage ||
-                  "Scanning your library and Last.fm history. The first setup can take up to 10 minutes."
-                : provider === "lastfm"
-                  ? "Add artists to your library or keep scrobbling on Last.fm. Recommendations improve as Aurral learns your taste."
-                  : "Connect a Last.fm API key for personalized recommendations, related artists, and flows."}
-            </p>
+            {isUpdating && updateProgressMessage ? (
+              <p className="discover-recommended-status__message">{updateProgressMessage}</p>
+            ) : null}
             {!isUpdating ? (
               <div className="discover-recommended-status__actions">
                 {provider !== "lastfm" ? (
@@ -695,6 +717,7 @@ function DiscoverPage() {
           <NearbyLocationControl
             locationMode={nearbyLocationMode}
             appliedZip={appliedNearbyZip}
+            appliedCountry={appliedNearbyCountry}
             location={nearbyShowsData?.location}
             onSelectYourLocation={() => setNearbyLocationMode("ip")}
             onStartCustomLocation={() => setNearbyLocationMode("zip")}
@@ -727,7 +750,7 @@ function DiscoverPage() {
         return (
           <section key="recommendedShows" className="artist-discover-section">
             <div className="artist-nearby-status artist-nearby-status--loading">
-              <Loader className="artist-nearby-status__spinner animate-spin" />
+              <DotLoader size="xl" label={null} />
             </div>
           </section>
         );
@@ -816,6 +839,7 @@ function DiscoverPage() {
                   isInLibrary={!!libraryLookup[getArtistId(artist)]}
                   canAddArtist={canAddArtist}
                   onNavigate={navigate}
+                  onOpenInLibrary={handleOpenArtistInLibrary}
                   onAddToLibrary={handleAddArtistToLibrary}
                   onFeedback={handleDiscoveryFeedback}
                   feedbackUsed={getArtistFeedbackFlags(artistFeedbackLookup, artist)}
@@ -855,6 +879,7 @@ function DiscoverPage() {
                       isInLibrary={!!libraryLookup[getArtistId(artist)]}
                       canAddArtist={canAddArtist}
                       onNavigate={navigate}
+                      onOpenInLibrary={handleOpenArtistInLibrary}
                       onAddToLibrary={handleAddArtistToLibrary}
                       onFeedback={handleDiscoveryFeedback}
                       feedbackUsed={getArtistFeedbackFlags(artistFeedbackLookup, artist)}
@@ -883,9 +908,8 @@ function DiscoverPage() {
   if (data === null && !error) {
     return (
       <div className="artist-loading--discover">
-        <Loader className="artist-spinner--discover animate-spin" />
+        <DotLoader size="2xl" label={null} className="aurral-dot-loader--discover" />
         <h2 className="artist-error-title--discover">Loading recommendations...</h2>
-        <p className="artist-error-copy--discover">Recommendations will appear as they load.</p>
       </div>
     );
   }
@@ -893,17 +917,15 @@ function DiscoverPage() {
   if (isActuallyUpdating) {
     return (
       <div className="artist-loading--discover">
-        <Loader className="artist-spinner--discover animate-spin" />
+        <DotLoader size="2xl" label={null} className="aurral-dot-loader--discover" />
         <h2 className="artist-error-title--discover">
           {isListenBrainzFallback
             ? "Loading ListenBrainz discovery..."
             : "Building your recommendations..."}
         </h2>
-        <p className="artist-error-copy--discover">
-          {isListenBrainzFallback
-            ? "The app is loading trending artists and default genre shelves."
-            : "The app is scanning your library and Last.fm data. Please wait. This can take up to 10 minutes when Last.fm is configured. The page will update when ready."}
-        </p>
+        {updateProgressMessage ? (
+          <p className="artist-error-copy--discover">{updateProgressMessage}</p>
+        ) : null}
       </div>
     );
   }
@@ -965,9 +987,6 @@ function DiscoverPage() {
                   playlistsUpdateMessage={playlistsUpdateMessage}
                 />
               </div>
-              <p className="artist-discover-hero__description">
-                Your daily mix, curated from your library.
-              </p>
               {heroBasedOn.length > 0 && (
                 <div className="artist-discover-hero__based-on">
                   <div className="artist-discover-hero__based-on-intro">Based on:</div>
@@ -1024,7 +1043,7 @@ function DiscoverPage() {
               )}
             </div>
 
-            <button
+            <TooltipButton
               type="button"
               onClick={openDiscoverModal}
               className="btn btn-icon-square btn-surface discover-page__customize-btn"
@@ -1032,7 +1051,7 @@ function DiscoverPage() {
               title="Customize Discover"
             >
               <LayoutTemplate className="artist-discover-hero__customize-icon" />
-            </button>
+            </TooltipButton>
           </div>
 
           <div className="artist-discover-hero__tags-section">

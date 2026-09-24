@@ -16,6 +16,7 @@ import { buildImageProxyUrl } from "../../../services/imageProxyService.js";
 import {
   attachCachedCoverUrls,
 } from "../../../services/releaseGroupCoverService.js";
+import { getArtistLibraryLookup } from "../../library/handlers/misc.js";
 import { getArtistByMbid } from "../../../services/providers/brainzmashProvider.js";
 import {
   getArtistTagPayload,
@@ -113,74 +114,8 @@ export function registerStream(router) {
         );
 
         const libraryTask = (async () => {
-          const { lidarrClient } = await import("../../../services/lidarrClient.js");
-          const { libraryManager } = await import("../../../services/libraryManager.js");
-
-          if (!lidarrClient.isConfigured()) return;
-
-          try {
-            const lidarrArtist = await lidarrClient.getArtistByMbid(mbid);
-            if (!lidarrArtist) {
-              if (isClientConnected()) {
-                sendSSE(res, "library", {
-                  exists: false,
-                  artist: null,
-                  albums: [],
-                });
-              }
-              return;
-            }
-            if (!isClientConnected()) return;
-
-            logger.info("stream", `Found artist in Lidarr: ${lidarrArtist.artistName}`);
-            const metadataArtist = await metadataArtistPromise;
-
-            sendArtist({
-              ...buildArtistBase(lidarrArtist.artistName, resolvedMbid, metadataArtist),
-              _lidarrData: {
-                id: lidarrArtist.id,
-                monitored: lidarrArtist.monitored,
-                statistics: lidarrArtist.statistics,
-              },
-            });
-
-            const libArtist = libraryManager.mapLidarrArtist(lidarrArtist);
-            sendSSE(res, "library", {
-              exists: true,
-              artist: {
-                ...libArtist,
-                foreignArtistId: libArtist.foreignArtistId || libArtist.mbid,
-                added: libArtist.addedAt,
-              },
-              albums: [],
-            });
-
-            const lidarrAlbums = await libraryManager.getAlbums(libArtist.id, lidarrArtist);
-
-            if (!isClientConnected()) return;
-
-            sendSSE(res, "library", {
-              exists: true,
-              artist: {
-                ...libArtist,
-                foreignArtistId: libArtist.foreignArtistId || libArtist.mbid,
-                added: libArtist.addedAt,
-              },
-              albums: lidarrAlbums.map((a) => ({
-                ...a,
-                foreignAlbumId: a.foreignAlbumId || a.mbid,
-                title: a.albumName,
-                albumType: "Album",
-                statistics: a.statistics || {
-                  trackCount: 0,
-                  sizeOnDisk: 0,
-                  percentOfTracks: 0,
-                },
-              })),
-            });
-          } catch (error) {
-            logger.warn("stream", `Failed to fetch from Lidarr: ${error.message}`);
-          }
+          const lookup = await getArtistLibraryLookup(mbid);
+          if (isClientConnected()) sendSSE(res, "library", lookup);
         })();
         tasks.push(libraryTask);
 
@@ -244,15 +179,7 @@ export function registerStream(router) {
                 artistName,
               }).catch(() => null);
               sendSSE(res, "cover", {
-                images: cachedCover?.images?.length
-                  ? cachedCover.images
-                  : [
-                      {
-                        image: cachedImage.imageUrl,
-                        front: true,
-                        types: ["Front"],
-                      },
-                    ],
+                images: cachedCover?.images || [],
               });
               return;
             }
@@ -329,7 +256,7 @@ export function registerStream(router) {
                     return {
                       id: a.mbid,
                       name: a.name,
-                      image: buildImageProxyUrl(img) || img,
+                      image: buildImageProxyUrl(img),
                       match: Math.round((a.match || 0) * 100),
                     };
                   })

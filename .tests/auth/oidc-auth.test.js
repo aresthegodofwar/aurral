@@ -87,11 +87,13 @@ function enableOidcEnv(overrides = {}) {
 async function createPendingOidcLogin(options = {}) {
   let issuer;
   let nonce;
-  const claimOverrides = options.claimOverrides || {};
+  const idTokenClaims = options.idTokenClaims || options.claimOverrides || {};
+  const userInfo = options.userInfo || null;
+  const userInfoError = options.userInfoError === true;
   const capturedTokenRequest = {};
   const discoveryServer = await createMockHttpServer((request, response) => {
-    response.writeHead(200, { "content-type": "application/json" });
     if (request.url === "/jwks") {
+      response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({ keys: [oidcKey] }));
       return;
     }
@@ -107,17 +109,24 @@ async function createPendingOidcLogin(options = {}) {
           JSON.stringify({
             access_token: "access-token",
             token_type: "Bearer",
-            id_token: createIdToken(issuer, nonce, claimOverrides),
+            id_token: createIdToken(issuer, nonce, idTokenClaims),
           }),
         );
       });
       return;
     }
+    if (request.url === "/userinfo") {
+      response.writeHead(userInfoError ? 500 : 200, { "content-type": "application/json" });
+      response.end(JSON.stringify(userInfoError ? { error: "userinfo_unavailable" } : userInfo));
+      return;
+    }
+    response.writeHead(200, { "content-type": "application/json" });
     response.end(
       JSON.stringify({
         issuer,
         authorization_endpoint: `${issuer}authorize`,
         token_endpoint: `${issuer}token`,
+        ...(userInfo ? { userinfo_endpoint: `${issuer}userinfo` } : {}),
         jwks_uri: `${issuer}jwks`,
       }),
     );
@@ -316,6 +325,75 @@ test("OIDC exchange never leaks passwordHash, for new or returning users", async
     assert.equal(session.user.passwordHash, undefined, "returning user must also be sanitized");
   } finally {
     await second.close();
+  }
+});
+
+test("OIDC callback combines UserInfo with ID-token claims", async () => {
+  process.env.OIDC_GROUPS_CLAIM = "groups";
+  process.env.OIDC_ADMIN_GROUPS = "aurral-admins";
+  const pending = await createPendingOidcLogin({
+    idTokenClaims: { preferred_username: undefined, groups: ["aurral-admins"] },
+    userInfo: {
+      sub: "oidc-subject",
+      preferred_username: "userinfo-user",
+      groups: ["regular-users"],
+    },
+  });
+
+  try {
+    const callback = await handleOidcCallback({
+      query: { state: pending.state, code: "authorization-code" },
+      headers: { cookie: pending.cookie },
+      ip: "127.0.0.1",
+    });
+    assert.equal(callback.user.username, "userinfo-user");
+    assert.equal(callback.user.role, "admin");
+  } finally {
+    await pending.close();
+  }
+});
+
+test("OIDC callback falls back to ID-token claims when UserInfo fails", async () => {
+  const pending = await createPendingOidcLogin({
+    idTokenClaims: { preferred_username: "id-token-user" },
+    userInfo: { sub: "oidc-subject" },
+    userInfoError: true,
+  });
+
+  try {
+    const callback = await handleOidcCallback({
+      query: { state: pending.state, code: "authorization-code" },
+      headers: { cookie: pending.cookie },
+      ip: "127.0.0.1",
+    });
+    assert.equal(callback.user.username, "id-token-user");
+  } finally {
+    await pending.close();
+  }
+});
+
+test("OIDC groups claim ignores UserInfo-only admin groups", async () => {
+  process.env.OIDC_GROUPS_CLAIM = "groups";
+  process.env.OIDC_ADMIN_GROUPS = "aurral-admins";
+  const pending = await createPendingOidcLogin({
+    idTokenClaims: { preferred_username: "id-token-user" },
+    userInfo: {
+      sub: "oidc-subject",
+      preferred_username: "userinfo-user",
+      groups: ["aurral-admins"],
+    },
+  });
+
+  try {
+    const callback = await handleOidcCallback({
+      query: { state: pending.state, code: "authorization-code" },
+      headers: { cookie: pending.cookie },
+      ip: "127.0.0.1",
+    });
+    assert.equal(callback.user.username, "userinfo-user");
+    assert.equal(callback.user.role, "user");
+  } finally {
+    await pending.close();
   }
 });
 

@@ -9,8 +9,12 @@ Aurral treats each download client equally. You must configure only one download
 
 Enable and connect both components:
 
-- The download client in **Settings > Download Clients**
+- The download client in **Settings > Download clients**
 - Prowlarr in **Settings > Indexers**
+
+## Search behavior
+
+When artist details are available, Aurral tries artist-and-album searches first. If they return too few suitable releases, it searches for the album title alone, then tries the album and track titles together. Without artist details, Aurral starts with the album title alone. Results still go through release matching, and Aurral validates downloaded files before importing them.
 
 ## Setup overview
 
@@ -24,7 +28,7 @@ Enable and connect both components:
 8. Select **Refresh indexers**.
 9. Enable each indexer.
 10. Set the priority for each indexer.
-11. Open **Settings > Download Clients**.
+11. Open **Settings > Download clients**.
 12. Enable **SABnzbd** or **NZBGet**.
 13. Enter the URL and credentials.
 14. Select **Test connection**.
@@ -53,7 +57,7 @@ Open the **SABnzbd** card under **Download clients**:
 - **Source priority**: relative to slskd. The default is `20`. The slskd default is `10`.
 - **Add NZBs paused**: send jobs to SABnzbd in a paused state
 
-Aurral monitors SABnzbd until the download is complete. Aurral then imports the best audio file into `aurral-weekly-flow`.
+Aurral monitors SABnzbd until the download is complete. Aurral then imports the best audio file into the Aurral Downloads Folder.
 
 ## NZBGet
 
@@ -67,19 +71,19 @@ Open the **NZBGet** card under **Download clients**:
 - **Completed download path**: optional override when Aurral cannot infer the finished-file location
 - **Add NZBs paused**: send jobs to NZBGet in a paused state
 
-Aurral monitors NZBGet until the download is complete. Aurral then imports the best audio file into `aurral-weekly-flow`.
+Aurral monitors NZBGet until the download is complete. Aurral then imports the best audio file into the Aurral Downloads Folder.
 
 If NZBGet runs on Windows and reports host paths, mount the parent folder into Aurral.
 
-Then, add a path mapping under **Settings > Download Clients > Remote Path Mappings**.
+Then, add a path mapping under **Settings > Download clients > Remote Path Mappings**.
 
-Aurral can find a track with an incorrect duration. Aurral retains this track under **Activity > Review**.
+Aurral can find a track with an incorrect duration. Aurral retains this track under **Activity > Queue**.
 
 You can preview, approve, or deny the track.
 
 ## Quality and upgrades
 
-Use **Settings > Download Clients > Quality Profile** to set acceptable quality tiers and the preferred cutoff. Aurral reads the completed audio file before it accepts the quality. A quality rejection does not go to Review.
+Use **Settings > Download clients > Quality profile** to set acceptable quality tiers and the preferred cutoff. Aurral reads the completed audio file before it accepts the quality. A quality rejection does not go to Queue review.
 
 Usenet can supply both missing tracks and upgrades. Upgrade searches follow the normal source priority and have a lower queue priority than missing-track downloads. See [Playlists: Track upgrades](/using/playlists/#track-upgrades).
 

@@ -17,7 +17,10 @@ const [
   { downloadTracker },
   { flowPlaylistConfig },
   { playlistManager },
+  { weeklyFlowWorker },
+  { queueQualityUpgrade },
   { registerJobs },
+  libraryStore,
 ] = await setupIsolatedBackend(
   "approved-import-path",
   "backend/config/db-sqlite.js",
@@ -25,13 +28,17 @@ const [
   "backend/services/weeklyFlow/weeklyFlowDownloadTracker.js",
   "backend/services/weeklyFlow/weeklyFlowPlaylistConfig.js",
   "backend/services/weeklyFlow/weeklyFlowPlaylistManager.js",
+  "backend/services/weeklyFlow/weeklyFlowWorker.js",
+  "backend/services/qualityProfileService.js",
   "backend/routes/weeklyFlow/handlers/jobs.js",
+  "backend/services/libraryMediaStore.js",
 );
 
 const app = express();
 app.use(express.json());
+let requestUser = { role: "admin" };
 app.use((req, _res, next) => {
-  req.user = { role: "admin" };
+  req.user = requestUser;
   next();
 });
 const router = express.Router();
@@ -42,6 +49,26 @@ const server = await new Promise((resolve) => {
 });
 const baseUrl = `http://127.0.0.1:${server.address().port}`;
 
+playlistManager.navidromeDestination.client = {
+  isConfigured: () => true,
+  async ensureWeeklyFlowLibrary() {},
+  async getPlaylists() {
+    return [];
+  },
+  async getPlaylistTrackPaths() {
+    return [];
+  },
+  async findSong() {
+    return { id: "reviewed-song" };
+  },
+  async createPlaylist(name) {
+    return { id: name, name };
+  },
+  async updatePlaylist() {},
+  async deletePlaylist() {},
+  async scanLibrary() {},
+};
+
 test.beforeEach(async () => {
   await resetDatabase(db);
   downloadTracker.clearAll();
@@ -50,11 +77,71 @@ test.beforeEach(async () => {
     ...dbOps.getSettings(),
     integrations: {},
     downloadFolderPath: process.env.DOWNLOAD_FOLDER,
+    playlistArtwork: { style: "aurral" },
   });
+});
+
+test("playlist jobs annotate tracks that are already in the canonical library", async () => {
+  const playlistId = "library-ownership-annotation";
+  flowPlaylistConfig.createSharedPlaylist({
+    id: playlistId,
+    name: "Library ownership",
+    tracks: [
+      { artistName: "Owned Artist", trackName: "Owned Track", trackMbid: "owned-mbid" },
+      { artistName: "Missing Artist", trackName: "Missing Track", trackMbid: "missing-mbid" },
+    ],
+  });
+  const ownedArtist = libraryStore.upsertLibraryArtist({
+    identityKey: "owned-playlist-artist",
+    name: "Owned Artist",
+  });
+  const ownedAlbum = libraryStore.upsertLibraryAlbum({
+    identityKey: "owned-playlist-album",
+    artistId: ownedArtist.id,
+    title: "Owned Album",
+  });
+  const ownedTrack = libraryStore.upsertLibraryTrack({
+    identityKey: "owned-playlist-track",
+    mbid: "owned-mbid",
+    title: "Owned Track",
+    artistName: "Owned Artist",
+  });
+  libraryStore.linkLibraryAlbumTrack({
+    albumId: ownedAlbum.id,
+    trackId: ownedTrack.id,
+    trackNumber: 1,
+  });
+  libraryStore.upsertLibraryMediaFile({
+    trackId: ownedTrack.id,
+    albumId: ownedAlbum.id,
+    source: "aurral",
+    path: "/library/Owned Artist/Owned Album/Owned Track.flac",
+    available: true,
+  });
+  downloadTracker.addJobs(
+    [
+      { artistName: "Owned Artist", trackName: "Owned Track", trackMbid: "owned-mbid" },
+      { artistName: "Missing Artist", trackName: "Missing Track", trackMbid: "missing-mbid" },
+    ],
+    playlistId,
+  );
+
+  const response = await fetch(`${baseUrl}/jobs/${playlistId}`);
+  const payload = await response.json();
+
+  assert.equal(response.status, 200, JSON.stringify(payload));
+  assert.deepEqual(
+    payload.map((job) => [job.trackName, job.libraryOwned]),
+    [
+      ["Owned Track", true],
+      ["Missing Track", false],
+    ],
+  );
 });
 
 test.after(async () => {
   await new Promise((resolve) => server.close(resolve));
+  db.close();
   await cleanupIsolatedState(isolatedState);
 });
 
@@ -78,8 +165,6 @@ test("approving a reviewed download commits it inside the managed playlist libra
   const payload = await response.json();
   const expectedPath = path.join(
     process.env.DOWNLOAD_FOLDER,
-    "aurral-weekly-flow",
-    playlistId,
     "Artist",
     "Album",
     "Track.flac",
@@ -89,11 +174,58 @@ test("approving a reviewed download commits it inside the managed playlist libra
   assert.equal(payload.path, expectedPath);
   assert.equal(downloadTracker.getJob(jobId)?.finalPath, expectedPath);
   assert.equal(await fs.readFile(expectedPath, "utf8"), "reviewed audio");
-  const m3u = await fs.readFile(
-    path.join(playlistManager.libraryRoot, "Reviewed.m3u"),
-    "utf8",
+  await assert.rejects(fs.access(path.join(playlistManager.libraryRoot, "Reviewed.m3u")));
+});
+
+test("approving a reviewed upgrade replaces the source playlist file", async (t) => {
+  const scan = t.mock.method(playlistManager, "scheduleScanLibrary", () => {});
+  const flow = flowPlaylistConfig.createFlow({
+    name: "Reviewed upgrade flow",
+    size: 10,
+    mix: { discover: 100 },
+    scheduleDays: [1],
+  });
+  const originalPath = path.join(
+    process.env.DOWNLOAD_FOLDER,
+    "_flows",
+    flow.id,
+    "Artist",
+    "Album",
+    "Track.mp3",
   );
-  assert.match(m3u, /Track\.flac/);
+  const candidatePath = path.join(isolatedState.baseDir, "review", "Track.flac");
+  await fs.mkdir(path.dirname(originalPath), { recursive: true });
+  await fs.mkdir(path.dirname(candidatePath), { recursive: true });
+  await fs.writeFile(originalPath, "original audio");
+  await fs.writeFile(candidatePath, "upgrade audio");
+
+  const sourceJobId = downloadTracker.addJob(
+    { artistName: "Artist", trackName: "Track", albumName: "Album" },
+    flow.id,
+  );
+  downloadTracker.setDone(sourceJobId, originalPath, "Album");
+  downloadTracker.updateQuality(sourceJobId, { tier: "mp3-128", format: "mp3" });
+  const upgradeJobId = downloadTracker.addUpgradeJob(downloadTracker.getJob(sourceJobId));
+  downloadTracker.setBlocked(upgradeJobId, "blocked-duration-mismatch", candidatePath);
+
+  const response = await fetch(`${baseUrl}/jobs/${upgradeJobId}/approve`, { method: "POST" });
+  const payload = await response.json();
+  const expectedPath = path.join(
+    process.env.DOWNLOAD_FOLDER,
+    "_flows",
+    flow.id,
+    "Artist",
+    "Album",
+    "Track.flac",
+  );
+
+  assert.equal(response.status, 200, JSON.stringify(payload));
+  assert.equal(payload.path, expectedPath);
+  assert.equal(downloadTracker.getJob(upgradeJobId), null);
+  assert.equal(downloadTracker.getJob(sourceJobId)?.finalPath, expectedPath);
+  assert.equal(await fs.readFile(expectedPath, "utf8"), "upgrade audio");
+  await assert.rejects(fs.access(originalPath));
+  assert.equal(scan.mock.callCount(), 1);
 });
 
 test("reports when an upgrade search is already queued for a track", async () => {
@@ -138,4 +270,159 @@ test("reports when an upgrade search is already queued for a track", async () =>
   assert.equal(second.status, 200, JSON.stringify(payload));
   assert.equal(payload.alreadyQueued, true);
   assert.equal(payload.queued, 0);
+});
+
+test("records queued upgrade history if the pipeline removes the live job immediately", async () => {
+  const playlistId = "e6be4cd3-10b0-4744-baa1-7e960a41ca54";
+  flowPlaylistConfig.createSharedPlaylist({
+    id: playlistId,
+    name: "Fast failure",
+    tracks: [{ artistName: "Artist", trackName: "Fast failure track", albumName: "Album" }],
+  });
+  dbOps.updateSettings({
+    ...dbOps.getSettings(),
+    integrations: {
+      slskd: { enabled: true, url: "http://127.0.0.1:1", apiKey: "test-key" },
+    },
+  });
+  const finalPath = path.join(
+    process.env.DOWNLOAD_FOLDER,
+    "aurral-weekly-flow",
+    playlistId,
+    "Artist",
+    "Album",
+    "Fast failure track.mp3",
+  );
+  await fs.mkdir(path.dirname(finalPath), { recursive: true });
+  await fs.writeFile(finalPath, "audio");
+  const jobId = downloadTracker.addJob(
+    { artistName: "Artist", trackName: "Fast failure track", albumName: "Album" },
+    playlistId,
+  );
+  downloadTracker.setDone(jobId, finalPath, "Album");
+  downloadTracker.updateQuality(jobId, { tier: "mp3-128", format: "mp3" });
+
+  const originalEnqueue = downloadTracker.enqueueDownloadPipeline;
+  downloadTracker.enqueueDownloadPipeline = (upgradeJobId) => {
+    downloadTracker.removeJob(upgradeJobId);
+    return true;
+  };
+  try {
+    assert.equal(await queueQualityUpgrade(downloadTracker.getJob(jobId)), "queued");
+    assert.equal(
+      dbOps.getAurralHistory().some(
+        (entry) => entry.metadata?.trackName === "Fast failure track",
+      ),
+      true,
+    );
+  } finally {
+    downloadTracker.enqueueDownloadPipeline = originalEnqueue;
+  }
+});
+
+test("search all stays within the requesting user's playlist access", async () => {
+  const ownedPlaylistId = "c0de1f39-226f-4ab8-8f37-09d8adf47b5a";
+  const otherPlaylistId = "a2b9ae35-7fb7-474e-a0d4-8ac4bdb8d9e6";
+  flowPlaylistConfig.createSharedPlaylist({
+    id: ownedPlaylistId,
+    name: "Owned wanted",
+    ownerUserId: 7,
+    tracks: [{ artistName: "Artist", trackName: "Missing", albumName: "Album" }],
+  });
+  flowPlaylistConfig.createSharedPlaylist({
+    id: otherPlaylistId,
+    name: "Other wanted",
+    ownerUserId: 8,
+    tracks: [{ artistName: "Artist", trackName: "Private", albumName: "Album" }],
+  });
+  const jobId = downloadTracker.addJob(
+    { artistName: "Artist", trackName: "Missing", albumName: "Album" },
+    ownedPlaylistId,
+  );
+  const otherJobId = downloadTracker.addJob(
+    { artistName: "Artist", trackName: "Private", albumName: "Album" },
+    otherPlaylistId,
+  );
+  downloadTracker.setFailed(jobId, "No source");
+  downloadTracker.setFailed(otherJobId, "No source");
+
+  const ownedPath = path.join(
+    process.env.DOWNLOAD_FOLDER,
+    "aurral-weekly-flow",
+    ownedPlaylistId,
+    "Artist",
+    "Album",
+    "Owned.mp3",
+  );
+  const otherPath = path.join(
+    process.env.DOWNLOAD_FOLDER,
+    "aurral-weekly-flow",
+    otherPlaylistId,
+    "Artist",
+    "Album",
+    "Private.mp3",
+  );
+  await fs.mkdir(path.dirname(ownedPath), { recursive: true });
+  await fs.mkdir(path.dirname(otherPath), { recursive: true });
+  await fs.writeFile(ownedPath, "audio");
+  await fs.writeFile(otherPath, "audio");
+  const ownedUpgradeId = downloadTracker.addJob(
+    { artistName: "Artist", trackName: "Owned", albumName: "Album" },
+    ownedPlaylistId,
+  );
+  const otherUpgradeId = downloadTracker.addJob(
+    { artistName: "Artist", trackName: "Private", albumName: "Album" },
+    otherPlaylistId,
+  );
+  downloadTracker.setDone(ownedUpgradeId, ownedPath, "Album");
+  downloadTracker.setDone(otherUpgradeId, otherPath, "Album");
+  downloadTracker.updateQuality(ownedUpgradeId, { tier: "mp3-128", format: "mp3" });
+  downloadTracker.updateQuality(otherUpgradeId, { tier: "mp3-128", format: "mp3" });
+  dbOps.updateSettings({
+    ...dbOps.getSettings(),
+    integrations: {
+      slskd: { enabled: true, url: "http://127.0.0.1:1", apiKey: "test-key" },
+    },
+  });
+
+  const originalStart = weeklyFlowWorker.start;
+  weeklyFlowWorker.start = async () => {};
+  requestUser = { role: "user", id: 7 };
+  try {
+    const missingResponse = await fetch(`${baseUrl}/research-missing`, { method: "POST" });
+    const missingPayload = await missingResponse.json();
+    assert.equal(missingResponse.status, 200, JSON.stringify(missingPayload));
+    assert.equal(missingPayload.requeued, 1);
+    assert.equal(downloadTracker.getJob(jobId)?.status, "pending");
+    assert.equal(downloadTracker.getJob(otherJobId)?.status, "failed");
+
+    const upgradeResponse = await fetch(`${baseUrl}/quality-upgrades`, { method: "POST" });
+    const upgradePayload = await upgradeResponse.json();
+    assert.equal(upgradeResponse.status, 200, JSON.stringify(upgradePayload));
+    assert.equal(upgradePayload.queued, 1);
+    assert.equal(upgradePayload.playlistCount, 1);
+    const queuedUpgrade = downloadTracker.getAll().find(
+      (job) => job.upgradeForJobId === ownedUpgradeId,
+    );
+    assert.equal(["pending", "downloading"].includes(queuedUpgrade?.status), true);
+    assert.equal(
+      downloadTracker.getAll().some((job) => job.upgradeForJobId === otherUpgradeId),
+      false,
+    );
+    assert.equal(
+      dbOps.getAurralHistory().some((entry) => entry.metadata?.jobId === queuedUpgrade.id),
+      true,
+    );
+
+    const jobsResponse = await fetch(`${baseUrl}/jobs`);
+    const jobsPayload = await jobsResponse.json();
+    assert.match(jobsResponse.headers.get("cache-control") || "", /no-store/);
+    assert.equal(
+      jobsPayload.some((job) => job.upgradeForJobId === ownedUpgradeId),
+      true,
+    );
+  } finally {
+    weeklyFlowWorker.start = originalStart;
+    requestUser = { role: "admin" };
+  }
 });

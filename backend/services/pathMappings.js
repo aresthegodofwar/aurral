@@ -2,7 +2,17 @@ import fs from "fs";
 import path from "path";
 
 let storedPathMappings = [];
-const PATH_MAPPING_SOURCES = new Set(["all", "lidarr", "slskd", "nzbget", "sabnzbd", "plex"]);
+const PATH_MAPPING_SOURCES = new Set([
+  "all",
+  "lidarr",
+  "slskd",
+  "nzbget",
+  "sabnzbd",
+  "deemix",
+  "plex",
+  "jellyfin",
+  "navidrome",
+]);
 
 export function syncPathMappings(value) {
   storedPathMappings = normalizePathMappings(value);

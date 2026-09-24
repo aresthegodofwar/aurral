@@ -1,6 +1,8 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { Check, Loader2, MoreVertical, Plus, Sparkles, Trash2, Upload, X } from "lucide-react";
+import { Check, MoreVertical, Plus, Sparkles, Trash2, Upload, X } from "lucide-react";
 import { useModalDialog } from "../hooks/useModalDialog.js";
+import { DotLoader } from "./DotLoader";
+import TooltipButton from "./TooltipButton";
 
 export function ModalShell({
   open,
@@ -10,6 +12,7 @@ export function ModalShell({
   children,
   footer,
   disableClose = false,
+  className = "",
 }) {
   const titleId = useId();
   const descriptionId = useId();
@@ -24,7 +27,7 @@ export function ModalShell({
     <div className="playlist-modal-backdrop" onClick={handleBackdropClick}>
       <div
         ref={dialogRef}
-        className="playlist-modal"
+        className={`playlist-modal${className ? ` ${className}` : ""}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
@@ -42,7 +45,7 @@ export function ModalShell({
               </p>
             ) : null}
           </div>
-          <button
+          <TooltipButton
             type="button"
             onClick={disableClose ? undefined : onClose}
             className="btn btn-ghost btn-sm btn-icon"
@@ -51,7 +54,7 @@ export function ModalShell({
             disabled={disableClose}
           >
             <X className="artist-icon-sm" />
-          </button>
+          </TooltipButton>
         </div>
         <div className="playlist-modal__body">{children}</div>
         {footer ? <div className="playlist-modal__footer">{footer}</div> : null}
@@ -93,8 +96,9 @@ export function CreatePlaylistModal({
   return (
     <ModalShell
       open={open}
-      title="New Playlist"
-      description="Create a manual playlist you can build up track by track."
+      className="playlist-modal--create"
+      title="New playlist"
+      description="Create a playlist you can build up track by track."
       onClose={onClose}
       disableClose={saving}
       footer={
@@ -114,18 +118,21 @@ export function CreatePlaylistModal({
             disabled={saving}
           >
             {saving ? (
-              <Loader2 className="artist-icon-sm animate-spin" />
+              <DotLoader size="sm" label={null} />
             ) : (
               <Plus className="artist-icon-sm" />
             )}
-            Create Playlist
+            Create playlist
           </button>
         </>
       }
     >
       <div className="playlist-modal__fields">
-        <label className="artist-field-label">Playlist Name</label>
+        <label className="artist-field-label" htmlFor="create-playlist-name">
+          Playlist name
+        </label>
         <input
+          id="create-playlist-name"
           type="text"
           value={name}
           onChange={(event) => {
@@ -262,7 +269,27 @@ export function RenamePlaylistModal({
     await onUpload?.(file);
   };
 
-  const coverSrc = previewUrl || (!imageFailed && artworkUrl ? artworkUrl : null);
+  const isSafeImageUrl = (value) => {
+    if (!value) return false;
+    try {
+      return ["http:", "https:", "data:", "blob:"].includes(
+        new URL(String(value), window.location.origin).protocol,
+      );
+    } catch {
+      return false;
+    }
+  };
+  const encodedPreviewUrl = (() => {
+    if (!previewUrl) return null;
+    try {
+      return encodeURI(String(previewUrl));
+    } catch {
+      return null;
+    }
+  })();
+  const coverSrc =
+    encodedPreviewUrl ||
+    (!imageFailed && isSafeImageUrl(artworkUrl) ? artworkUrl : null);
   const fallbackLabel =
     String(displayName || name || "?")
       .trim()
@@ -300,7 +327,7 @@ export function RenamePlaylistModal({
               <span className="playlist-modal__cover-picker-overlay">Change image</span>
             </button>
             <div className="playlist-modal__cover-menu">
-              <button
+              <TooltipButton
                 type="button"
                 className="btn btn-secondary btn-icon btn-sm playlist-modal__cover-menu-trigger"
                 disabled={busy}
@@ -314,7 +341,7 @@ export function RenamePlaylistModal({
                 }}
               >
                 <MoreVertical className="artist-icon-sm" />
-              </button>
+              </TooltipButton>
               {coverMenuOpen ? (
                 <>
                   <button
@@ -349,7 +376,7 @@ export function RenamePlaylistModal({
                     >
                       <span className="artist-menu-item__main">
                         {coverBusy ? (
-                          <Loader2 className="artist-icon-sm animate-spin" />
+                          <DotLoader size="sm" label={null} />
                         ) : (
                           <Sparkles className="artist-icon-sm" />
                         )}
@@ -413,7 +440,7 @@ export function RenamePlaylistModal({
               disabled={busy}
             >
               {saving ? (
-                <Loader2 className="artist-icon-sm animate-spin" />
+                <DotLoader size="sm" label={null} />
               ) : (
                 <Check className="artist-icon-sm" />
               )}

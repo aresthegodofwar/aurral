@@ -3,10 +3,12 @@ import { lookupArtistsInLibraryBatch, readLibraryLookupCache } from "../../../ut
 import { getArtistFeedbackFlags } from "../../../utils/discoveryFeedback";
 import { getArtistRecordId } from "../../../utils/artistTaste";
 
-import { Loader, ChevronLeft, ChevronRight } from "lucide-react";
+import { ChevronLeft, ChevronRight } from "lucide-react";
+import { DotLoader } from "../../../components/DotLoader";
 import SearchLibraryCheck from "../../../components/SearchLibraryCheck";
 import ArtistImage from "../../../components/ArtistImage";
 import { ArtistContextMenu } from "../../../components/ArtistContextMenu";
+import TooltipButton from "../../../components/TooltipButton";
 export function ArtistDetailsSimilar({
   loadingSimilar,
   similarArtists,
@@ -89,10 +91,10 @@ export function ArtistDetailsSimilar({
       <div className="artist-similar-header">
         <h2 className="artist-section-title">
           Fans Also Like
-          {loadingSimilar && <Loader className="artist-icon-sm animate-spin" />}
+          {loadingSimilar && <DotLoader size="sm" label={null} />}
         </h2>
         <div className="artist-scroll-controls">
-          <button
+          <TooltipButton
             type="button"
             onClick={() => scrollByAmount(-1)}
             className="btn btn-ghost btn-icon-square"
@@ -101,8 +103,8 @@ export function ArtistDetailsSimilar({
             disabled={!canScrollLeft}
           >
             <ChevronLeft className="artist-icon-lg" />
-          </button>
-          <button
+          </TooltipButton>
+          <TooltipButton
             type="button"
             onClick={() => scrollByAmount(1)}
             className="btn btn-ghost btn-icon-square"
@@ -111,12 +113,12 @@ export function ArtistDetailsSimilar({
             disabled={!canScrollRight}
           >
             <ChevronRight className="artist-icon-lg" />
-          </button>
+          </TooltipButton>
         </div>
       </div>
       {loadingSimilar ? (
         <div className="artist-loading">
-          <Loader className="artist-spinner animate-spin" />
+          <DotLoader size="xl" label={null} />
         </div>
       ) : similarArtists.length > 0 ? (
         <div>

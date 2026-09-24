@@ -3,17 +3,22 @@ title: Activity
 description: Track active downloads, Lidarr requests, and Aurral playlist jobs.
 ---
 
-Activity replaces the older Requests and Downloads views. It has three tabs:
+Activity replaces the older Requests and Downloads views. It has two views:
 
-- **Queue**: album requests and downloads in progress
-- **Review**: downloaded tracks that need your approval
+- **Queue**: album requests, queued or active downloads, playlist imports, and tracks waiting for review
 - **History**: completed, denied, and failed events
+
+The **Wanted** section combines Aurral-owned tracks that need another search with
+files that do not meet the configured quality cutoff.
+
+Use the **Missing** and **Cutoff unmet** links under **Wanted** to switch between
+those two filters.
 
 ![Aurral activity timeline](../../../assets/screenshots/history.webp)
 
-Use **Queue** to see active downloads and processes.
+Use **Queue** to see queued and active downloads and processes, including playlist imports that have not started yet. Review items stay in this list because they are queued for your decision. A duration or identity mismatch can remain here for preview, approval, or denial.
 
-Use **Review** when you must listen to a track before import. Use **History** to see completed and failed events.
+Use the review controls in **Queue** when you must listen to a track before import. Use **History** to see completed and failed events.
 
 Each review row shows the requested track, artist, album, and remote file path. It also shows the match scores and duration.
 
@@ -21,6 +26,18 @@ Aurral keeps a possible match for review if the duration is not correct. It does
 
 When an album request fails in Lidarr, you can retry the search from History when the entry supports it.
 
-Album requests store the requester. Activity can show the requester, and external tools can filter requests by user.
+Use the search action on a Wanted row to re-search a failed Aurral operation or
+search for a quality upgrade. These actions apply across flows and static
+playlists.
+
+Use **Search all** to re-search every missing track or queue upgrade searches
+for every cutoff-unmet track in the active Wanted view. Cutoff rows change to
+**Upgrade queued** immediately and keep that state after a page refresh. Follow
+the active searches in **Queue** and their result in **History**.
+
+Use the info action on any activity or Wanted row to inspect the operation
+details without leaving the page.
+
+Album requests store the requester. Activity can show the requester, and external tools can filter requests by user. A Lidarr import webhook can also mark a requested album as available as soon as Lidarr imports it.
 
 See [yt-dlp](/integrations/ytdlp/), [slskd](/integrations/slskd/), and [Usenet](/integrations/usenet/) for download client setup.

@@ -18,7 +18,7 @@ import {
   getAccessibleSharedPlaylist,
 } from "./utils.js";
 import {
-  buildPlaylistDestination,
+  buildAurralTrackDestination,
   resolvePlaylistRoot,
 } from "../../../services/playlistPaths.js";
 import {
@@ -30,20 +30,40 @@ import { finalizePipelineJobSuccess } from "../../../services/pipelineHelpers.js
 import path from "path";
 import fs from "fs/promises";
 import { invalidateRequestsCache } from "../../requests.js";
-import { enqueueSystemTaskJob } from "../../../services/honkerDb.js";
 import {
   decorateJobQuality,
   classifyQualityJob,
   getQualityProfile,
   queueQualityUpgrade,
+  runQualityUpgradeCheck,
 } from "../../../services/qualityProfileService.js";
+import { getCanonicalTrackOwnershipBatch } from "../../../services/libraryQueryService.js";
+import {
+  isFlowOwnerProcess,
+  requestFlowOwner,
+} from "../../../services/weeklyFlow/weeklyFlowOwnerClient.js";
+
+const getAccessiblePlaylistIds = (user) => [
+  ...new Set([
+    ...flowPlaylistConfig.getFlowsForUser(user),
+    ...flowPlaylistConfig.getSharedPlaylistsForUser(user),
+  ].map((playlist) => playlist.id)),
+];
+
+async function runQualityChecksLocally(playlistIds) {
+  let queued = 0;
+  for (const playlistId of playlistIds) {
+    queued += await runQualityUpgradeCheck({ force: true, playlistId, limit: 500 });
+  }
+  return queued;
+}
 
 export function registerJobs(router) {
   router.get("/status", noCache, (req, res) => {
     res.json(getWeeklyFlowStatusSnapshot({ user: req.user }));
   });
 
-  router.get("/jobs/:flowId", async (req, res) => {
+  router.get("/jobs/:flowId", noCache, async (req, res) => {
     const { flowId } = req.params;
     if (!canAccessPlaylistType(req.user, flowId)) {
       return res.status(404).json({ error: "Playlist not found" });
@@ -55,16 +75,44 @@ export function registerJobs(router) {
       rawLimit && Number.isFinite(parsedLimit) && parsedLimit > 0
         ? Math.floor(parsedLimit)
         : null;
-    let jobs = downloadTracker.getByPlaylistType(flowId, limit);
     const sharedPlaylist = flowPlaylistConfig.getSharedPlaylist(flowId);
-    if (sharedPlaylist?.tracks?.length && limit == null) {
-      jobs = orderJobsBySharedPlaylistTracks(jobs, sharedPlaylist.tracks);
+    const sharedTracks = sharedPlaylist?.tracks;
+    let jobs = downloadTracker.getByPlaylistType(
+      flowId,
+      sharedTracks?.length ? null : limit,
+    );
+    if (sharedTracks?.length) {
+      const referencedJobIds = new Set(
+        sharedTracks.map((track) => String(track?.canonicalJobId || "")).filter(Boolean),
+      );
+      const referencedJobs = [...referencedJobIds]
+        .map((jobId) => downloadTracker.getJob(jobId))
+        .filter(Boolean);
+      jobs = [...referencedJobs, ...jobs].filter(
+        (job, index, values) => values.findIndex((candidate) => candidate.id === job.id) === index,
+      );
+      jobs = orderJobsBySharedPlaylistTracks(jobs, sharedTracks);
+      if (limit != null) jobs = jobs.slice(0, limit);
+      jobs = jobs.map((job) =>
+        referencedJobIds.has(job.id) && job.playlistType !== flowId
+          ? { ...job, playlistId: flowId, playlistType: flowId }
+          : job,
+      );
     }
     const profile = getQualityProfile();
-    res.json(filterJobsForUser(req.user, jobs).map((job) => decorateJobQuality(job, profile)));
+    const accessibleJobs = filterJobsForUser(req.user, jobs).map((job) =>
+      decorateJobQuality(job, profile),
+    );
+    const libraryOwnership = getCanonicalTrackOwnershipBatch(accessibleJobs);
+    res.json(
+      accessibleJobs.map((job, index) => ({
+        ...job,
+        libraryOwned: libraryOwnership[index] === true,
+      })),
+    );
   });
 
-  router.get("/jobs", (req, res) => {
+  router.get("/jobs", noCache, (req, res) => {
     const { status } = req.query;
     const jobs = filterJobsForUser(
       req.user,
@@ -72,6 +120,36 @@ export function registerJobs(router) {
     );
     const profile = getQualityProfile();
     res.json(jobs.map((job) => decorateJobQuality(job, profile)));
+  });
+
+  router.post("/research-missing", async (req, res) => {
+    try {
+      let requeued = 0;
+      for (const playlistId of getAccessiblePlaylistIds(req.user)) {
+        requeued += await weeklyFlowWorker.researchMissingTracks(playlistId);
+      }
+      return res.json({ success: true, requeued });
+    } catch (error) {
+      return res.status(500).json({
+        error: "Failed to re-search missing tracks",
+        message: error.message,
+      });
+    }
+  });
+
+  router.post("/quality-upgrades", async (req, res) => {
+    const playlistIds = getAccessiblePlaylistIds(req.user);
+    const queued = isFlowOwnerProcess()
+      ? await runQualityChecksLocally(playlistIds)
+      : await requestFlowOwner("runQualityUpgradeChecks", [playlistIds, 500], {
+        timeoutMs: 30 * 60 * 1000,
+      });
+    if (queued > 0) invalidateRequestsCache();
+    return res.json({
+      success: true,
+      queued,
+      playlistCount: playlistIds.length,
+    });
   });
 
   router.post("/quality-upgrades/:playlistId/:jobId", async (req, res) => {
@@ -83,13 +161,18 @@ export function registerJobs(router) {
     if (!job || job.playlistType !== playlistId) {
       return res.status(404).json({ error: "Track not found" });
     }
-    const result = await queueQualityUpgrade(job);
+    const result = isFlowOwnerProcess()
+      ? await queueQualityUpgrade(job)
+      : await requestFlowOwner("queueQualityUpgradeForJob", [job.id], {
+        timeoutMs: 10 * 60 * 1000,
+      });
     if (result === "already-queued") {
       return res.json({ success: true, queued: 0, alreadyQueued: true, jobId });
     }
     if (result !== "queued") {
       return res.status(409).json({ error: "Track is not eligible for an upgrade" });
     }
+    invalidateRequestsCache();
     return res.json({ success: true, queued: 1, jobId });
   });
 
@@ -98,11 +181,13 @@ export function registerJobs(router) {
     if (!canAccessPlaylistType(req.user, playlistId)) {
       return res.status(404).json({ error: "Playlist not found" });
     }
-    enqueueSystemTaskJob(
-      { kind: "quality-upgrade-check", force: true, playlistId, limit: 500 },
-      { priority: -10 },
-    );
-    return res.json({ success: true, queued: 0, scheduled: true });
+    const queued = isFlowOwnerProcess()
+      ? await runQualityChecksLocally([playlistId])
+      : await requestFlowOwner("runQualityUpgradeChecks", [[playlistId], 500], {
+        timeoutMs: 30 * 60 * 1000,
+      });
+    if (queued > 0) invalidateRequestsCache();
+    return res.json({ success: true, queued });
   });
 
   router.put("/playlists/:playlistId/retry-cycle", async (req, res) => {
@@ -123,7 +208,7 @@ export function registerJobs(router) {
       if (paused) {
         await pauseSharedPlaylistRetryCycle(playlistId);
       } else {
-        weeklyFlowWorker.setRetryCyclePaused(playlistId, false);
+        await weeklyFlowWorker.setRetryCyclePaused(playlistId, false);
         await weeklyFlowWorker.retryIncompletePlaylist(playlistId);
       }
       return res.json({
@@ -161,7 +246,7 @@ export function registerJobs(router) {
         });
       }
     }
-    const settings = weeklyFlowWorker.updateWorkerSettings({
+    const settings = await weeklyFlowWorker.updateWorkerSettings({
       concurrency,
       existingFileMode,
     });
@@ -216,7 +301,10 @@ export function registerJobs(router) {
     const ext = path.extname(sourcePath).toLowerCase();
     const albumDir = sanitizePathPart(job.albumName, "Unknown Album");
     const artistDir = sanitizePathPart(job.artistName, "Unknown Artist");
-    const destination = buildPlaylistDestination(job.playlistType, artistDir, albumDir);
+    const playlistId = job.playlistId || job.playlistType;
+    const destination = buildAurralTrackDestination(playlistId, artistDir, albumDir, {
+      ephemeral: Boolean(flowPlaylistConfig.getFlow(playlistId)),
+    });
     const finalDir = joinUnderRoot(playlistRoot, destination);
     const finalName = `${sanitizePathPart(job.trackName, "Unknown Track")}${ext || ".mp3"}`;
     const finalPath = path.join(finalDir, finalName);
@@ -245,12 +333,9 @@ export function registerJobs(router) {
     if (sourcePath) {
       await fs.rm(sourcePath, { force: true }).catch(() => {});
     }
-    const deniedSourceKey =
-      job.downloadSource === "usenet"
-        ? String(job.releaseGuid || "").trim()
-        : job.downloadSource === "ytdlp"
-          ? String(job.releaseGuid || "").trim()
-          : `${String(job.remoteUsername || "").trim()}\0${String(job.remoteFilename || "").trim()}`;
+    const deniedSourceKey = ["usenet", "ytdlp", "deemix"].includes(job.downloadSource)
+      ? String(job.releaseGuid || "").trim()
+      : `${String(job.remoteUsername || "").trim()}\0${String(job.remoteFilename || "").trim()}`;
     if (job.downloadSource && deniedSourceKey) {
       downloadTracker.recordDeniedSource(job.id, job.downloadSource, deniedSourceKey);
     }
@@ -301,7 +386,7 @@ export function registerJobs(router) {
       res.json({
         success: true,
         message:
-          "Playlists ensured. M3U files in the Aurral playlist library reference completed track paths and import after Navidrome scans that library.",
+          "Playlists ensured. Navidrome creates API playlists after it indexes completed tracks.",
       });
     } catch (error) {
       res.status(500).json({

@@ -1,7 +1,10 @@
 import { useEffect, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { getProwlarrIndexers, testProwlarrConnection } from "../../../utils/api/endpoints/settings.js";
+import { queryClient, queryKeys } from "../../../queryClient.js";
 
 import { RefreshCw } from "lucide-react";
+import { DotLoader } from "../../../components/DotLoader";
 import { SettingsInput } from "./SettingsField";
 import { IntegrationCard, SettingsIntegrationModal } from "./SettingsIntegrationCards";
 import {
@@ -27,14 +30,30 @@ export function SettingsIndexersSection({
 }) {
   const [activeModal, setActiveModal] = useState(null);
   const [testingProwlarr, setTestingProwlarr] = useState(false);
-  const [loadingProwlarrIndexers, setLoadingProwlarrIndexers] = useState(false);
-  const [prowlarrIndexers, setProwlarrIndexers] = useState([]);
+  const [testStatus, setTestStatus] = useState(null);
 
   const prowlarr = settings.integrations?.prowlarr || {};
   const prowlarrConfigured = Boolean(prowlarr.url && prowlarr.apiKey);
   const prowlarrEnabled = prowlarr.enabled === true;
+  const indexersQuery = useQuery({
+    queryKey: queryKeys.prowlarrIndexers,
+    queryFn: ({ signal }) => getProwlarrIndexers({ signal }),
+    enabled: health?.prowlarrConfigured === true,
+    staleTime: 60_000,
+  });
+  const prowlarrIndexers = health?.prowlarrConfigured
+    ? Array.isArray(indexersQuery.data?.indexers)
+      ? indexersQuery.data.indexers
+      : []
+    : [];
+  const loadingProwlarrIndexers = indexersQuery.isFetching;
 
-  const updateIntegration = (key, patch) =>
+  useEffect(() => {
+    setTestStatus(null);
+  }, [activeModal]);
+
+  const updateIntegration = (key, patch) => {
+    setTestStatus(null);
     updateSettings({
       ...settings,
       integrations: {
@@ -45,17 +64,12 @@ export function SettingsIndexersSection({
         },
       },
     });
+  };
 
   const loadProwlarrIndexers = async ({ quiet = false } = {}) => {
-    if (!health?.prowlarrConfigured) {
-      setProwlarrIndexers([]);
-      return;
-    }
-    setLoadingProwlarrIndexers(true);
     try {
-      const result = await getProwlarrIndexers();
+      const { data: result } = await indexersQuery.refetch({ throwOnError: true });
       const indexers = Array.isArray(result?.indexers) ? result.indexers : [];
-      setProwlarrIndexers(indexers);
       if (!quiet && indexers.length > 0) {
         showSuccess(`Loaded ${indexers.length} Usenet indexer(s)`);
       }
@@ -71,34 +85,8 @@ export function SettingsIndexersSection({
             "Failed to load Prowlarr indexers",
         );
       }
-    } finally {
-      setLoadingProwlarrIndexers(false);
     }
   };
-
-  useEffect(() => {
-    if (!health?.prowlarrConfigured) {
-      setProwlarrIndexers([]);
-      return;
-    }
-    let cancelled = false;
-    setLoadingProwlarrIndexers(true);
-    getProwlarrIndexers()
-      .then((result) => {
-        if (!cancelled) {
-          setProwlarrIndexers(Array.isArray(result?.indexers) ? result.indexers : []);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) setProwlarrIndexers([]);
-      })
-      .finally(() => {
-        if (!cancelled) setLoadingProwlarrIndexers(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [health?.prowlarrConfigured]);
 
   const updateProwlarrIndexer = (id, patch) => {
     const key = String(id);
@@ -125,7 +113,9 @@ export function SettingsIndexersSection({
   };
 
   const handleTestProwlarr = async () => {
+    setTestStatus(null);
     if (!prowlarrEnabled || !prowlarr.url || !prowlarr.apiKey) {
+      setTestStatus({ tone: "error", message: "Enable Prowlarr and enter the URL and API key." });
       showError("Enable Prowlarr and enter URL and API key first");
       return;
     }
@@ -133,9 +123,13 @@ export function SettingsIndexersSection({
     try {
       await handleSaveSettings();
       const result = await testProwlarrConnection();
-      setProwlarrIndexers(Array.isArray(result.indexers) ? result.indexers : []);
+      queryClient.setQueryData(queryKeys.prowlarrIndexers, {
+        indexers: Array.isArray(result.indexers) ? result.indexers : [],
+      });
+      setTestStatus({ tone: "success", message: "Connected." });
       showSuccess(result.message || "Prowlarr connection OK");
     } catch (error) {
+      setTestStatus({ tone: "error", message: "Connection failed. Check the URL and API key, then retry." });
       showError(
         error.response?.data?.message ||
           error.response?.data?.error ||
@@ -157,15 +151,9 @@ export function SettingsIndexersSection({
     <>
       <div className="settings-page__section">
         <div className="settings-page__section-header">
-          <div className="settings-page__section-intro">
-            <h3 className="settings-page__section-title">Indexers</h3>
-            <p className="settings-page__section-note">
-              Configure Prowlarr and choose which Usenet indexers Aurral uses.
-            </p>
-          </div>
           {loadingProwlarrIndexers && (
             <span className="settings-page__status">
-              <RefreshCw className="settings-page__status-icon animate-spin" />
+              <DotLoader size="sm" label={null} className="settings-page__status-icon" />
               Loading
             </span>
           )}
@@ -210,6 +198,7 @@ export function SettingsIndexersSection({
         <SettingsIntegrationModal
           title="Prowlarr"
           onClose={() => setActiveModal(null)}
+          testStatus={testStatus}
           footerActions={
             <button
               type="button"
@@ -217,18 +206,20 @@ export function SettingsIndexersSection({
               disabled={testingProwlarr || loadingProwlarrIndexers}
               onClick={handleTestProwlarr}
             >
-              <RefreshCw className={`artist-icon-sm${testingProwlarr ? " animate-spin" : ""}`} />
+              {testingProwlarr ? (
+                <DotLoader size="sm" label={null} />
+              ) : (
+                <RefreshCw className="artist-icon-sm" aria-hidden />
+              )}
               {testingProwlarr ? "Testing..." : "Test connection"}
             </button>
           }
         >
-          <SettingsModalSection title="General">
-            <SettingsModalToggle
-              label="Enable Prowlarr"
-              checked={prowlarrEnabled}
-              onChange={(event) => updateIntegration("prowlarr", { enabled: event.target.checked })}
-            />
-          </SettingsModalSection>
+          <SettingsModalToggle
+            label="Enable Prowlarr"
+            checked={prowlarrEnabled}
+            onChange={(event) => updateIntegration("prowlarr", { enabled: event.target.checked })}
+          />
 
           <SettingsModalSection title="Connection">
             <SettingsModalField label="Server URL">
@@ -285,9 +276,11 @@ export function SettingsIndexersSection({
                 disabled={loadingProwlarrIndexers || !health?.prowlarrConfigured}
                 onClick={() => loadProwlarrIndexers()}
               >
-                <RefreshCw
-                  className={`artist-icon-sm${loadingProwlarrIndexers ? " animate-spin" : ""}`}
-                />
+                {loadingProwlarrIndexers ? (
+                  <DotLoader size="sm" label={null} />
+                ) : (
+                  <RefreshCw className="artist-icon-sm" aria-hidden />
+                )}
                 {loadingProwlarrIndexers ? "Refreshing..." : "Refresh indexers"}
               </button>
             </SettingsModalActions>
@@ -301,18 +294,16 @@ export function SettingsIndexersSection({
             const state = getIndexerState(activeIndexer);
             return (
               <>
-                <SettingsModalSection title="General">
-                  <SettingsModalToggle
-                    label="Enable in Aurral"
-                    checked={state.aurralEnabled}
-                    onChange={(event) =>
-                      updateProwlarrIndexer(activeIndexer.id, {
-                        enabled: event.target.checked,
-                        priority: state.priority,
-                      })
-                    }
-                  />
-                </SettingsModalSection>
+                <SettingsModalToggle
+                  label="Enable in Aurral"
+                  checked={state.aurralEnabled}
+                  onChange={(event) =>
+                    updateProwlarrIndexer(activeIndexer.id, {
+                      enabled: event.target.checked,
+                      priority: state.priority,
+                    })
+                  }
+                />
                 <SettingsModalSection title="Priority">
                   <SettingsModalField label="Priority">
                     <SettingsInput

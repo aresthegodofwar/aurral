@@ -1,6 +1,7 @@
 import { Navigate, useNavigate, useParams } from "react-router-dom";
 import { useDocumentTitle } from "../hooks/useDocumentTitle";
-import { Loader, Music, MapPin, AlertCircle } from "lucide-react";
+import { Music, MapPin, AlertCircle } from "lucide-react";
+import { DotLoader } from "../components/DotLoader";
 import NearbyLocationControl from "../components/NearbyLocationControl";
 import ShowCard from "../components/ShowCard";
 import { PageSectionMobileNav } from "../components/PageSectionMobileNav";
@@ -42,6 +43,7 @@ function ShowsPage() {
     error: showsError,
     locationMode,
     appliedZip,
+    appliedCountry,
     setLocationMode,
     setAppliedZip,
     locationLabel,
@@ -51,9 +53,6 @@ function ShowsPage() {
   const showGroups = getShowGroups(showsData);
   const shows = showGroups[showFilter] || showGroups.all;
   const hasAnyShows = Object.values(showGroups).some((group) => group.length > 0);
-  const pageSubtitle = showsLoading
-    ? "Finding Ticketmaster events matched to your library and recommendations."
-    : `Upcoming concerts around ${locationLabel}.`;
   const emptyMessage =
     showFilter === "library"
       ? `We could not find local Ticketmaster shows for artists from your library around ${locationLabel}.`
@@ -75,11 +74,11 @@ function ShowsPage() {
         <div className="shows-page__title-row">
           <div className="shows-page__title-wrap">
             <h1 className="page-title">Shows Near You</h1>
-            <p className="page-subtitle">{pageSubtitle}</p>
           </div>
           <NearbyLocationControl
             locationMode={locationMode}
             appliedZip={appliedZip}
+            appliedCountry={appliedCountry}
             location={showsData?.location}
             onSelectYourLocation={() => setLocationMode("ip")}
             onStartCustomLocation={() => setLocationMode("zip")}
@@ -114,7 +113,7 @@ function ShowsPage() {
         </div>
       ) : showsLoading ? (
         <div className="artist-loading">
-          <Loader className="artist-spinner artist-spinner--large animate-spin" />
+          <DotLoader size="2xl" label={null} />
         </div>
       ) : showsError ? (
         <div className="artist-error-panel" role="alert">

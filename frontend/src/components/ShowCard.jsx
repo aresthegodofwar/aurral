@@ -1,6 +1,7 @@
 import { memo } from "react";
 import { Clock, MapPin, Music } from "lucide-react";
 import { formatDate, formatTime } from "../utils/dateTime.js";
+import Tooltip from "./Tooltip";
 
 const DATE_ONLY_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
 
@@ -86,7 +87,10 @@ function ShowMeta({ showDate, showLocation, className }) {
 }
 
 const ShowCard = memo(({ show }) => {
-  const artistLabel = show.artistName || "Matched artist";
+  const artistNames = (Array.isArray(show.artistNames) ? show.artistNames : [show.artistName])
+    .filter((name) => typeof name === "string" && name.trim())
+    .map((name) => name.trim());
+  const artistLabel = artistNames.join(", ") || "Matched artist";
   const eventLabel = show.eventName || artistLabel || "Upcoming show";
   const eventUrl = getEventUrl(show.url);
   const distanceLabel = formatDistance(show.distance);
@@ -118,7 +122,7 @@ const ShowCard = memo(({ show }) => {
           />
         ) : (
           <div className="artist-media-placeholder--discover">
-            <Music className="artist-media-placeholder--discover-icon" />
+            <Music className="artist-media-placeholder--discover-icon" aria-hidden="true" />
           </div>
         )}
         <div className="artist-show-card__image--discover-overlay" />
@@ -144,12 +148,13 @@ const ShowCard = memo(({ show }) => {
         <div className="artist-show-card__body-heading">
           <p className="artist-show-card__body-artist--discover artist-truncate">{artistLabel}</p>
           <h3 className="artist-show-card__body-title--discover">
-            <span
-              className="artist-show-card__body-title-text--discover artist-truncate"
-              title={eventLabel}
-            >
-              {eventLabel}
-            </span>
+            <Tooltip content={eventLabel}>
+              <span
+                className="artist-show-card__body-title-text--discover artist-truncate"
+              >
+                {eventLabel}
+              </span>
+            </Tooltip>
           </h3>
         </div>
         <ShowMeta

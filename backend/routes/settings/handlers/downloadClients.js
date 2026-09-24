@@ -1,4 +1,30 @@
 import { validateExternalUrl } from "../../../middleware/urlValidator.js";
+import {
+  getDownloadClient,
+  getDownloadClientSettings,
+  testDownloadClient,
+} from "../../../services/download/downloadClientSettings.js";
+
+function validateDownloadClientTestConfig(key, config) {
+  const definition = getDownloadClientSettings()[key];
+  const nextConfig =
+    config && typeof config === "object" && !Array.isArray(config)
+      ? { ...config }
+      : {};
+
+  for (const field of definition?.fields || []) {
+    if (field.type !== "url") continue;
+    const value = nextConfig[field.key];
+    if (value == null || String(value).trim() === "") continue;
+    const validation = validateExternalUrl(value);
+    if (!validation.valid) {
+      throw new Error(`${field.label || field.key}: ${validation.error}`);
+    }
+    nextConfig[field.key] = validation.url;
+  }
+
+  return nextConfig;
+}
 
 function registerClientTest(router, path, importClient, label, { warning } = {}) {
   router.post(path, async (_req, res) => {
@@ -26,10 +52,33 @@ function registerClientTest(router, path, importClient, label, { warning } = {})
 }
 
 export function registerDownloadClients(router) {
+  router.get("/download-clients", (_req, res) => {
+    res.json({ clients: getDownloadClientSettings() });
+  });
+
+  router.post("/download-clients/:key/test", async (req, res) => {
+    try {
+      const config = validateDownloadClientTestConfig(req.params.key, req.body);
+      const result = await testDownloadClient(req.params.key, config);
+      if (!result.configured) {
+        return res.status(400).json(result);
+      }
+      if (!result.ok) {
+        return res.status(502).json(result);
+      }
+      return res.json({ success: true, warning: result.warning === true, ...result });
+    } catch (error) {
+      return res.status(400).json({
+        error: "Connection failed",
+        message: error.message,
+      });
+    }
+  });
+
   registerClientTest(
     router,
     "/slskd/test",
-    async () => (await import("../../../services/slskdClient.js")).slskdClient,
+    async () => getDownloadClient("slskd"),
     "slskd",
     { warning: true },
   );
@@ -57,21 +106,21 @@ export function registerDownloadClients(router) {
   registerClientTest(
     router,
     "/nzbget/test",
-    async () => (await import("../../../services/nzbgetClient.js")).nzbgetClient,
+    async () => getDownloadClient("nzbget"),
     "NZBGet",
   );
 
   registerClientTest(
     router,
     "/sabnzbd/test",
-    async () => (await import("../../../services/sabnzbdClient.js")).sabnzbdClient,
+    async () => getDownloadClient("sabnzbd"),
     "SABnzbd",
   );
 
   registerClientTest(
     router,
     "/ytdlp/test",
-    async () => (await import("../../../services/ytdlpClient.js")).ytdlpClient,
+    async () => getDownloadClient("ytdlp"),
     "yt-dlp",
   );
 
@@ -108,6 +157,33 @@ export function registerDownloadClients(router) {
       res
         .status(status && status >= 400 ? status : 500)
         .json({ error: "Gotify test failed", message: msg });
+    }
+  });
+
+  router.post("/webhook/test", async (req, res) => {
+    const webhook =
+      req.body && typeof req.body === "object" && !Array.isArray(req.body)
+        ? { ...req.body }
+        : {};
+    const urlValidation = validateExternalUrl(webhook.url);
+    if (!urlValidation.valid) {
+      return res.status(400).json({ error: urlValidation.error });
+    }
+
+    try {
+      const { sendWebhookTest } =
+        await import("../../../services/notificationService.js");
+      await sendWebhookTest({ ...webhook, url: urlValidation.url });
+      return res.json({ success: true, message: "Test webhook sent" });
+    } catch (error) {
+      const status = error.response?.status;
+      const msg =
+        error.response?.data?.description ||
+        error.response?.data?.error ||
+        error.message;
+      return res
+        .status(status && status >= 400 ? status : 500)
+        .json({ error: "Webhook test failed", message: msg });
     }
   });
 }

@@ -14,14 +14,34 @@ const [isolatedState, { db }, historyModule] = await setupIsolatedBackend(
   "backend/services/aurralHistoryService.js",
 );
 
-const { upsertAurralHistory, getAurralHistoryRequests, recordTrackJobBlocked } = historyModule;
+const {
+  upsertAurralHistory,
+  getAurralHistoryRequests,
+  recordTrackJobBlocked,
+  recordTrackJobQueued,
+} = historyModule;
 const { downloadTracker } = await importFromRepo(
   "backend/services/weeklyFlow/weeklyFlowDownloadTracker.js",
 );
+const { getHonkerDb } = await importFromRepo("backend/services/honkerDb.js");
+const { lidarrClient } = await importFromRepo("backend/services/lidarrClient.js");
 
 test.beforeEach(() => {
   resetDatabase(db);
+  const transaction = getHonkerDb().transaction();
+  transaction.execute("DELETE FROM _honker_live WHERE queue = ?", ["weekly-flow-operation"]);
+  transaction.commit();
   downloadTracker.clearAll();
+});
+
+test("activity reads stay local when Lidarr is disabled", async (t) => {
+  t.mock.method(lidarrClient, "isConfigured", () => false);
+  const request = t.mock.method(lidarrClient, "request", async () => {
+    throw new Error("disabled activity reads must not call Lidarr");
+  });
+
+  assert.deepEqual(await getAurralHistoryRequests(lidarrClient), []);
+  assert.equal(request.mock.callCount(), 0);
 });
 
 test.after(async () => {
@@ -168,6 +188,95 @@ test("getAurralHistoryRequests reconciles completed download jobs", async () => 
   assert.equal(entry?.inQueue, false);
 });
 
+test("getAurralHistoryRequests reconciles pending queued jobs as reused when tracker job is done", async () => {
+  const jobId = downloadTracker.addJob(
+    {
+      artistName: "Artist",
+      trackName: "Reused Song",
+    },
+    "playlist-1",
+  );
+  upsertAurralHistory({
+    referenceId: jobId,
+    kind: "track_download",
+    title: "Queueing Reused Song",
+    subtitle: "Artist · Playlist",
+    status: "pending",
+    statusLabel: "Queued",
+    metadata: {
+      jobId,
+      trackName: "Reused Song",
+      artistName: "Artist",
+      playlistId: "playlist-1",
+    },
+    createdAt: Date.now() - 60 * 1000,
+  });
+  downloadTracker.setDone(jobId, "/tmp/reused-song.flac", "Album");
+
+  const entries = await getAurralHistoryRequests();
+  const entry = entries.find((item) => item.jobId === jobId);
+
+  assert.equal(entry?.status, "completed");
+  assert.equal(entry?.statusLabel, "Reused");
+  assert.equal(entry?.inQueue, false);
+});
+
+test("queued library track jobs appear in activity immediately", async () => {
+  const jobId = downloadTracker.addJob(
+    {
+      artistName: "Artist",
+      trackName: "Queued Song",
+      albumName: "Album",
+      trackMbid: "track-mbid",
+    },
+    "library",
+  );
+
+  recordTrackJobQueued(downloadTracker.getJob(jobId));
+
+  const entry = (await getAurralHistoryRequests()).find((item) => item.jobId === jobId);
+  assert.equal(entry?.status, "pending");
+  assert.equal(entry?.statusLabel, "Queued");
+  assert.equal(entry?.inQueue, true);
+  assert.equal(entry?.trackName, "Queued Song");
+});
+
+test("pending tracker jobs without history appear in activity immediately", async () => {
+  const jobId = downloadTracker.addJob(
+    {
+      artistName: "Artist",
+      trackName: "Unrecorded Song",
+    },
+    "playlist-1",
+  );
+
+  const entry = (await getAurralHistoryRequests()).find((item) => item.jobId === jobId);
+  assert.equal(entry?.status, "pending");
+  assert.equal(entry?.statusLabel, "Queued");
+  assert.equal(entry?.inQueue, true);
+  assert.equal(entry?.trackName, "Unrecorded Song");
+});
+
+test("pending playlist imports appear in activity before the worker starts", async () => {
+  const operationId = getHonkerDb().queue("weekly-flow-operation").enqueue({
+    kind: "shared-playlist-create",
+    playlistId: "pending-playlist",
+    name: "Pending Playlist",
+    sourceName: "ListenBrainz",
+    ownerUserId: 42,
+    tracks: [{ artistName: "Artist", trackName: "Song" }],
+  });
+
+  const entry = (await getAurralHistoryRequests()).find(
+    (item) => item.id === `aurral-playlist_import-${operationId}`,
+  );
+  assert.equal(entry?.kind, "playlist_import");
+  assert.equal(entry?.status, "pending");
+  assert.equal(entry?.statusLabel, "Queued");
+  assert.equal(entry?.playlistName, "Pending Playlist");
+  assert.equal(entry?.subtitle, "ListenBrainz · 1 track waiting for download");
+});
+
 test("getAurralHistoryRequests fails stale active download history", async () => {
   const jobId = downloadTracker.addJob(
     {
@@ -192,8 +301,10 @@ test("getAurralHistoryRequests fails stale active download history", async () =>
     },
     createdAt: Date.now() - 20 * 60 * 1000,
   });
+  downloadTracker.setDownloading(jobId);
   const job = downloadTracker.getJob(jobId);
   job.createdAt = Date.now() - 20 * 60 * 1000;
+  job.startedAt = job.createdAt;
 
   const entries = await getAurralHistoryRequests();
   const entry = entries.find((item) => item.jobId === jobId);

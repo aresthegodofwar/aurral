@@ -6,6 +6,7 @@ import { runSharedInflight } from "./sharedInflight.js";
 const ticketmasterEventCache = createCache(15 * 60);
 const ipLocationCache = createCache(30 * 60);
 const zipLocationCache = createCache(24 * 60 * 60);
+const nearbyShowsResponseCache = createCache(5 * 60, 100);
 const nearbyShowsInflight = new Map();
 
 const DEFAULT_RADIUS_MILES = 250;
@@ -51,6 +52,14 @@ const normalizeUsZip = (value) =>
   String(value || "")
     .trim()
     .split("-")[0];
+
+const sanitizeCountryCode = (value) => {
+  const country = String(value || "")
+    .trim()
+    .replace(/[^a-zA-Z]/g, "")
+    .toUpperCase();
+  return country.length === 2 ? country : "";
+};
 
 const sanitizeIpAddress = (value) => {
   const raw = String(value || "").trim();
@@ -183,15 +192,17 @@ const getTicketmasterLocationParams = (location, radiusMiles) => {
   throw new Error("Unable to determine a search location");
 };
 
-const resolveZipLocation = async (zipCode) => {
+const resolveZipLocation = async (zipCode, countryCode) => {
   const zip = sanitizeZipCode(zipCode);
   if (!zip) return null;
+  const normalizedCountryCode = sanitizeCountryCode(countryCode);
   const normalizedZip = isLikelyUsZip(zip) ? normalizeUsZip(zip) : zip;
-  const cached = zipLocationCache.get(normalizedZip);
+  const cacheKey = `${normalizedCountryCode || "auto"}:${normalizedZip}`;
+  const cached = zipLocationCache.get(cacheKey);
   if (cached) return cached;
-  return runSharedInflight(nearbyShowsInflight, `zip:${normalizedZip}`, async (signal) => {
+  return runSharedInflight(nearbyShowsInflight, `zip:${cacheKey}`, async (signal) => {
     try {
-      if (isLikelyUsZip(normalizedZip)) {
+      if (isLikelyUsZip(normalizedZip) && (!normalizedCountryCode || normalizedCountryCode === "US")) {
         const response = await axios.get(
           `https://api.zippopotam.us/us/${encodeURIComponent(normalizedZip)}`,
           {
@@ -207,6 +218,7 @@ const resolveZipLocation = async (zipCode) => {
         if (place) {
           const location = {
             source: "zip",
+            resolved: true,
             postalCode: normalizedZip,
             city: place["place name"] || null,
             region: place.state || null,
@@ -216,7 +228,7 @@ const resolveZipLocation = async (zipCode) => {
             longitude: place.longitude != null ? Number(place.longitude) : null,
           };
           location.label = buildLocationLabel(location);
-          zipLocationCache.set(normalizedZip, location);
+          zipLocationCache.set(cacheKey, location);
           return location;
         }
       }
@@ -225,7 +237,9 @@ const resolveZipLocation = async (zipCode) => {
       const response = await axios.get("https://nominatim.openstreetmap.org/search", {
         params: {
           postalcode: normalizedZip,
-          countrycodes: isLikelyUsZip(normalizedZip) ? "us" : undefined,
+          countrycodes:
+            normalizedCountryCode?.toLowerCase() ||
+            (isLikelyUsZip(normalizedZip) ? "us" : undefined),
           format: "jsonv2",
           addressdetails: 1,
           limit: 1,
@@ -242,16 +256,19 @@ const resolveZipLocation = async (zipCode) => {
       const address = result.address || {};
       const location = {
         source: "zip",
+        resolved: true,
         postalCode: normalizedZip,
         city: address.city || address.town || address.village || null,
         region: address.state || null,
         regionCode: null,
-        countryCode: address.country_code ? String(address.country_code).toUpperCase() : null,
+        countryCode: address.country_code
+          ? String(address.country_code).toUpperCase()
+          : normalizedCountryCode || null,
         latitude: result.lat != null ? Number(result.lat) : null,
         longitude: result.lon != null ? Number(result.lon) : null,
       };
       location.label = buildLocationLabel(location);
-      zipLocationCache.set(normalizedZip, location);
+      zipLocationCache.set(cacheKey, location);
       return location;
     } catch {
       return null;
@@ -279,6 +296,7 @@ const resolveIpLocation = async (ipAddress) => {
     }
     const location = {
       source: "ip",
+      resolved: true,
       postalCode: sanitizeZipCode(response.data?.postal),
       city: response.data?.city || null,
       region: response.data?.region || null,
@@ -298,6 +316,7 @@ const fetchTicketmasterEvents = async ({ location, radiusMiles }) => {
   if (!apiKey) return [];
   const cacheKey = JSON.stringify({
     postalCode: location.postalCode || null,
+    countryCode: location.countryCode || null,
     latitude: location.latitude || null,
     longitude: location.longitude || null,
     radiusMiles,
@@ -350,6 +369,35 @@ const buildShowRecord = (event, artist) => {
   };
 };
 
+export const groupShowsByEvent = (shows) => {
+  const groups = new Map();
+  for (const [index, show] of (Array.isArray(shows) ? shows : []).entries()) {
+    const eventId = String(show?.ticketmasterEventId || show?.id || "").trim();
+    const key = eventId ? `event:${eventId}` : `show:${index}`;
+    let group = groups.get(key);
+    if (!group) {
+      group = { ...show, artistNames: [], artistKeys: new Set() };
+      groups.set(key, group);
+    }
+
+    const artistNames = Array.isArray(show?.artistNames)
+      ? show.artistNames
+      : [show?.artistName];
+    for (const value of artistNames) {
+      const name = String(value || "").trim();
+      const artistKey = normalizeArtistKey(name) || name.toLowerCase();
+      if (!name || group.artistKeys.has(artistKey)) continue;
+      group.artistKeys.add(artistKey);
+      group.artistNames.push(name);
+    }
+  }
+
+  return [...groups.values()].map(({ artistKeys: _artistKeys, ...show }) => ({
+    ...show,
+    artistName: show.artistNames[0] || show.artistName || null,
+  }));
+};
+
 const buildArtistMap = (artists, sourceType) => {
   const map = new Map();
   for (const artist of artists || []) {
@@ -361,6 +409,8 @@ const buildArtistMap = (artists, sourceType) => {
   }
   return map;
 };
+
+const resolveArtists = (artists) => typeof artists === "function" ? artists() : artists;
 
 const sortShows = (shows) =>
   shows.sort((a, b) => {
@@ -375,28 +425,37 @@ const sortShows = (shows) =>
 export const getNearbyShows = async ({
   req,
   zipCode,
+  countryCode,
   libraryArtists = [],
   recommendedArtists = [],
   trendingArtists = [],
   radiusMiles = DEFAULT_RADIUS_MILES,
   limit = DEFAULT_SHOW_LIMIT,
+  responseCacheKey = null,
 }) => {
   const resolvedLimit = Math.max(1, Math.min(Number(limit) || DEFAULT_SHOW_LIMIT, MAX_SHOW_LIMIT));
   const sanitizedZipCode = sanitizeZipCode(zipCode);
-  const libraryArtistMap = buildArtistMap(libraryArtists, "library");
-  const recommendedArtistMap = buildArtistMap(recommendedArtists, "recommended");
-  const trendingArtistMap = buildArtistMap(trendingArtists, "trending");
+  const sanitizedCountryCode = sanitizeCountryCode(countryCode);
+  const locationKey = sanitizedZipCode
+    ? `${sanitizedCountryCode || "auto"}:${sanitizedZipCode}`
+    : getForwardedIp(req);
+  const resultCacheKey = responseCacheKey
+    ? JSON.stringify([responseCacheKey, locationKey, radiusMiles, resolvedLimit])
+    : null;
+  const cachedResult = resultCacheKey ? nearbyShowsResponseCache.get(resultCacheKey) : null;
+  if (cachedResult) return cachedResult;
 
   let location;
   if (sanitizedZipCode) {
     location =
-      (await resolveZipLocation(sanitizedZipCode)) || {
+      (await resolveZipLocation(sanitizedZipCode, sanitizedCountryCode)) || {
         source: "zip",
+        resolved: false,
         postalCode: sanitizedZipCode,
         city: null,
         region: null,
         regionCode: null,
-        countryCode: isLikelyUsZip(sanitizedZipCode) ? "US" : null,
+        countryCode: sanitizedCountryCode || (isLikelyUsZip(sanitizedZipCode) ? "US" : null),
         latitude: null,
         longitude: null,
         label: sanitizedZipCode,
@@ -405,7 +464,22 @@ export const getNearbyShows = async ({
     location = await resolveIpLocation(getForwardedIp(req));
   }
 
+  if (location.resolved === false) {
+    const result = {
+      location,
+      shows: [],
+      libraryShows: [],
+      recommendedShows: [],
+      total: 0,
+    };
+    if (resultCacheKey) nearbyShowsResponseCache.set(resultCacheKey, result);
+    return result;
+  }
+
   const events = await fetchTicketmasterEvents({ location, radiusMiles });
+  const libraryArtistMap = buildArtistMap(resolveArtists(libraryArtists), "library");
+  const recommendedArtistMap = buildArtistMap(resolveArtists(recommendedArtists), "recommended");
+  const trendingArtistMap = buildArtistMap(resolveArtists(trendingArtists), "trending");
   const libraryShows = [];
   const recommendedShows = [];
   const seen = new Set();
@@ -433,14 +507,21 @@ export const getNearbyShows = async ({
     }
   }
 
-  sortShows(libraryShows);
-  sortShows(recommendedShows);
+  const groupedShows = groupShowsByEvent([...libraryShows, ...recommendedShows]);
+  const groupedLibraryShows = groupShowsByEvent(libraryShows);
+  const groupedRecommendedShows = groupShowsByEvent(recommendedShows);
 
-  return {
+  sortShows(groupedShows);
+  sortShows(groupedLibraryShows);
+  sortShows(groupedRecommendedShows);
+
+  const result = {
     location,
-    shows: [...libraryShows, ...recommendedShows].slice(0, resolvedLimit),
-    libraryShows: libraryShows.slice(0, resolvedLimit),
-    recommendedShows: recommendedShows.slice(0, resolvedLimit),
-    total: libraryShows.length + recommendedShows.length,
+    shows: groupedShows.slice(0, resolvedLimit),
+    libraryShows: groupedLibraryShows.slice(0, resolvedLimit),
+    recommendedShows: groupedRecommendedShows.slice(0, resolvedLimit),
+    total: groupedShows.length,
   };
+  if (resultCacheKey) nearbyShowsResponseCache.set(resultCacheKey, result);
+  return result;
 };

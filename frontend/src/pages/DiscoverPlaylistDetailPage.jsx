@@ -3,6 +3,7 @@ import {
   adoptDiscoverPlaylistAsFlow,
   adoptDiscoverPlaylistAsStatic,
   getDiscoverArtworkUrl,
+  getDiscoverPlaylistPreviews,
 } from "../utils/api/endpoints/discovery.js";
 import {
   addSharedPlaylistTracks,
@@ -14,10 +15,11 @@ import { useDiscoverNavigation } from "../hooks/useDiscoverNavigation";
 import { useToast } from "../contexts/ToastContext";
 import { extractTwoToneGradientFromImage } from "../utils/imageColors";
 import { reserveUniquePlaylistName } from "./ArtistDetails/utils";
-import { Crosshair } from "lucide-react";
+import { ArrowLeft, Crosshair } from "lucide-react";
 
-import { useParams } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 import { FlowTracksPanel } from "./flows/flowComponents/flowTrackComponents.jsx";
+import { DotLoader } from "../components/DotLoader";
 const getPlaylistTextColor = (hex) => {
   const raw = String(hex || "").trim();
   if (raw === "#ffffff" || raw === "#fffac8" || raw === "#ffe119" || raw === "#fabed4" || raw === "#dcbeff" || raw === "#aaffc3") return "#222";
@@ -42,17 +44,19 @@ const mapPlaylistTracks = (tracks, presetId) =>
       artistName: track?.artistName || "Unknown Artist",
       trackName: track?.trackName || "Unknown Track",
       albumName: track?.albumName || null,
-      durationMs: null,
+      durationMs: track?.durationMs || null,
       reason: track?.reason || "Discover playlist",
       artistMbid: artistMbid || null,
       albumMbid: String(track?.albumMbid || "").trim() || null,
       trackMbid: trackMbid || null,
+      status: track?.preview_url ? "done" : "pending",
+      streamUrl: track?.preview_url || null,
     };
   });
 
 export default function DiscoverPlaylistDetailPage() {
   const { presetId } = useParams();
-  const { data } = useDiscoverData();
+  const { data, error } = useDiscoverData();
   const navigate = useDiscoverNavigation();
   const { showSuccess, showError } = useToast();
 
@@ -61,9 +65,35 @@ export default function DiscoverPlaylistDetailPage() {
     return playlists.find((p) => p.presetId === presetId) || null;
   }, [data?.discoverPlaylists, presetId]);
 
+  const [previewTracks, setPreviewTracks] = useState(null);
+  const [previewMessage, setPreviewMessage] = useState("");
+
+  useEffect(() => {
+    setPreviewTracks(null);
+    setPreviewMessage("");
+    if (playlist?.type !== "editorial") return undefined;
+    const controller = new AbortController();
+    getDiscoverPlaylistPreviews(playlist.presetId, { signal: controller.signal })
+      .then((result) => {
+        if (controller.signal.aborted) return;
+        const nextTracks = result?.tracks || [];
+        setPreviewTracks(nextTracks);
+        if (!nextTracks.some((track) => track?.preview_url)) {
+          setPreviewMessage("No Deezer previews are available for this playlist.");
+        }
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) {
+          setPreviewTracks(null);
+          setPreviewMessage("Deezer previews are unavailable right now.");
+        }
+      });
+    return () => controller.abort();
+  }, [playlist?.presetId, playlist?.type]);
+
   const tracks = useMemo(
-    () => (playlist ? mapPlaylistTracks(playlist.tracks || [], playlist.presetId) : []),
-    [playlist],
+    () => (playlist ? mapPlaylistTracks(previewTracks || playlist.tracks || [], playlist.presetId) : []),
+    [playlist, previewTracks],
   );
   const hasAlbumMetadata = useMemo(
     () => tracks.some((track) => String(track?.albumName || "").trim()),
@@ -242,12 +272,41 @@ export default function DiscoverPlaylistDetailPage() {
     [navigate, playlist, showError, showSuccess],
   );
 
+  if (!data && !error) {
+    return (
+      <div className="discover-playlist-detail">
+        <section className="discover-playlist-detail__status" aria-live="polite">
+          <DotLoader size="lg" label={null} />
+          <h1>Loading playlist</h1>
+        </section>
+      </div>
+    );
+  }
+
+  if (error && !playlist) {
+    return (
+      <div className="discover-playlist-detail">
+        <section className="discover-playlist-detail__status" role="alert">
+          <h1>Unable to load playlist</h1>
+          <p>{error}</p>
+          <Link className="btn btn-secondary btn-sm" to="/discover/playlists">
+            Back to playlists
+          </Link>
+        </section>
+      </div>
+    );
+  }
+
   if (!playlist) {
     return (
       <div className="discover-playlist-detail">
-        <div className="arr-page__empty">
-          <p>Playlist not found.</p>
-        </div>
+        <section className="discover-playlist-detail__status">
+          <h1>Playlist not found</h1>
+          <p>This discovery playlist is no longer available.</p>
+          <Link className="btn btn-secondary btn-sm" to="/discover/playlists">
+            Back to playlists
+          </Link>
+        </section>
       </div>
     );
   }
@@ -257,10 +316,12 @@ export default function DiscoverPlaylistDetailPage() {
   return (
     <div
       className="discover-playlist-detail"
-      style={{
-        background: `linear-gradient(180deg, ${heroColor} 0%, ${heroColor} 120px, var(--aurral-surface) 400px)`,
-      }}
+      style={{ "--discover-playlist-hero-color": heroColor }}
     >
+      <Link className="discover-playlist-detail__back" to="/discover/playlists">
+        <ArrowLeft aria-hidden="true" />
+        Back to playlists
+      </Link>
       <div className="discover-playlist-detail__hero">
         <div className="discover-playlist-detail__cover">
           {showArtwork ? (
@@ -275,7 +336,9 @@ export default function DiscoverPlaylistDetailPage() {
               className="discover-playlist-detail__cover-fallback"
               style={{ backgroundColor: heroColor }}
             >
-              {playlist?.type === "editorial" ? <Crosshair className="artist-icon-xl" /> : null}
+              {playlist?.type === "editorial" ? (
+                <Crosshair className="artist-icon-xl" aria-hidden="true" />
+              ) : null}
               {sourceLine && (
                 <span
                   className="discover-playlist-detail__cover-label"
@@ -321,12 +384,22 @@ export default function DiscoverPlaylistDetailPage() {
         </div>
       </div>
 
+      {previewMessage ? (
+        <p className="flow-page__tracks-error" role="status">{previewMessage}</p>
+      ) : null}
       <FlowTracksPanel
         tracks={tracks}
         loading={false}
-        showPlaybackControls={false}
+        playbackSource={{
+          type: "discover-playlist-preview",
+          id: playlist.presetId,
+          label: playlist.name,
+          recordHistory: false,
+        }}
+        showPlaybackControls={playlist.type === "editorial"}
         hideAlbumColumn={!hasAlbumMetadata}
         hideStatusColumn
+        hideQualityColumn
         emptyMessage="No tracks in this playlist."
         playlistTriggerVariant="expand"
         playlists={sharedPlaylists}

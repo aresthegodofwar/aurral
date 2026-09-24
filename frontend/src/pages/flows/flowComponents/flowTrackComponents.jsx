@@ -1,23 +1,34 @@
 import { useEffect, useRef, useMemo, useState, useCallback } from "react";
 import {
-  Loader2,
+  ExternalLink,
+  Heart,
   ListMusic,
   Play,
   Pause,
   Shuffle,
   Search,
-  MoreHorizontal,
   ArrowUp,
   ArrowDown,
   Plus,
   Trash2,
   Pencil,
+  UserRound,
 } from "lucide-react";
+import { DotLoader } from "../../../components/DotLoader";
+import TooltipButton from "../../../components/TooltipButton";
 import { getFlowTrackDisplayNumber, sortFlowTracks } from "../../../utils/flowTrackSort";
 import { Link } from "react-router-dom";
 import { useAudioQueue } from "../../../contexts/audioQueueContext";
 import { normalizeFlowTrack } from "../../../utils/audioQueue";
 import { TrackPlaylistMenu, TrackPlaylistSubmenu } from "../../ArtistDetails/components/TrackPlaylistMenu";
+import { LibraryItemMenu } from "../../../components/LibraryItemMenu";
+import { PlaylistArtworkThumb } from "./PlaylistArtworkThumb.jsx";
+import {
+  getTrackAvailability,
+  getTrackSearchAction,
+  shouldShowAddToLibrary,
+} from "../trackAvailability.js";
+import Tooltip from "../../../components/Tooltip";
 
 function getTrackStatusMeta(status) {
   switch (String(status || "").toLowerCase()) {
@@ -53,6 +64,12 @@ function getTrackQualityMeta(track) {
     external: "External",
   }[track.qualityState] || "");
   return { label, state };
+}
+
+function formatTrackDuration(durationMs) {
+  const seconds = Math.max(0, Math.floor(Number(durationMs || 0) / 1000));
+  if (!seconds) return "—";
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
 function BulkPlaylistAction({
@@ -172,7 +189,18 @@ function FlowTrackPlaylistMenus({
 
 function FlowTrackKebabMenu({
   track,
+  canPlay = false,
+  isPlaying = false,
+  onPlay,
+  onAddToLibrary,
+  isAddingToLibrary = false,
+  isFavorite = false,
+  isFavoritePending = false,
+  onToggleFavorite,
+  onNavigateAlbum,
+  onNavigateArtist,
   canReSearch,
+  searchAction,
   isReSearching,
   canDelete,
   isDeleting,
@@ -180,117 +208,97 @@ function FlowTrackKebabMenu({
   onDelete,
   playlistMenuProps = null,
 }) {
-  const [isOpen, setIsOpen] = useState(false);
   const [openSubmenu, setOpenSubmenu] = useState(null);
-  const [menuPosition, setMenuPosition] = useState(null);
-  const menuRef = useRef(null);
-  const triggerRef = useRef(null);
-  const onLoadPlaylistsRef = useRef(playlistMenuProps?.onLoadPlaylists);
-  onLoadPlaylistsRef.current = playlistMenuProps?.onLoadPlaylists;
-
-  useEffect(() => {
-    const handleClickOutside = (event) => {
-      if (menuRef.current && !menuRef.current.contains(event.target)) {
-        setIsOpen(false);
-        setOpenSubmenu(null);
-        setMenuPosition(null);
-      }
-    };
-    if (isOpen) {
-      document.addEventListener("mousedown", handleClickOutside);
-    }
-    return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, [isOpen]);
-
-  useEffect(() => {
-    if (!isOpen) return;
-    onLoadPlaylistsRef.current?.();
-  }, [isOpen]);
-
-  const close = () => {
-    setIsOpen(false);
-    setOpenSubmenu(null);
-    setMenuPosition(null);
-  };
   const trackLabel = track?.trackName || "track";
-  const openMenu = () => {
-    const rect = triggerRef.current?.getBoundingClientRect();
-    if (rect) {
-      const menuWidth = 216;
-      const viewportPadding = 12;
-      setMenuPosition({
-        top: rect.bottom + 8,
-        left: Math.min(
-          Math.max(viewportPadding, rect.right - menuWidth),
-          window.innerWidth - menuWidth - viewportPadding,
-        ),
-      });
-    }
-    setIsOpen(true);
-  };
-
+  const canNavigateAlbum = Boolean(track?.albumMbid && onNavigateAlbum);
+  const canNavigateArtist = Boolean(track?.artistMbid && onNavigateArtist);
+  const canAddToLibrary = shouldShowAddToLibrary(track, onAddToLibrary);
+  const actionItems = [
+    onPlay
+      ? {
+          id: "play",
+          label: isPlaying ? "Pause" : "Play",
+          icon: isPlaying ? Pause : Play,
+          disabled: !canPlay,
+          onSelect: () => onPlay(track),
+        }
+      : null,
+    canAddToLibrary
+      ? {
+          id: "add-library",
+          label: "Add to library",
+          icon: Plus,
+          disabled: isAddingToLibrary,
+          onSelect: () => onAddToLibrary(track),
+        }
+      : null,
+    onToggleFavorite
+      ? {
+          id: "favorite",
+          label: isFavorite ? "Remove from favorites" : "Add to favorites",
+          icon: Heart,
+          selected: isFavorite,
+          separatorBefore: true,
+          disabled: isFavoritePending,
+          onSelect: () => onToggleFavorite?.(track),
+        }
+      : null,
+    canNavigateAlbum
+      ? {
+          id: "album",
+          label: "Go to album",
+          icon: ExternalLink,
+          separatorBefore: true,
+          onSelect: () => onNavigateAlbum(track),
+        }
+      : null,
+    canNavigateArtist
+      ? {
+          id: "artist",
+          label: "Go to artist",
+          icon: UserRound,
+          onSelect: () => onNavigateArtist(track),
+        }
+      : null,
+    canReSearch
+      ? {
+          id: "re-search",
+          label: searchAction === "upgrade" ? "Search for upgrade" : "Re-search",
+          icon: Search,
+          disabled: isReSearching,
+          onSelect: () => onReSearch?.(track),
+        }
+      : null,
+    canDelete
+      ? {
+          id: "remove",
+          label: "Remove from playlist",
+          icon: Trash2,
+          danger: true,
+          disabled: isDeleting,
+          onSelect: () => onDelete?.(track),
+        }
+      : null,
+  ].filter(Boolean);
+  const additionalItemsAfter = canAddToLibrary
+    ? "add-library"
+    : canReSearch
+      ? "re-search"
+      : "remove";
   return (
-    <div
-      className={`flow-page__track-menu${isOpen ? " is-open" : ""}`}
-      ref={menuRef}
-    >
-      <button
-        ref={triggerRef}
-        type="button"
-        onClick={(event) => {
-          event.stopPropagation();
-          if (isOpen) {
-            close();
-            return;
-          }
-          openMenu();
-        }}
-        className="btn btn-secondary btn-icon btn-xs flow-page__track-menu-trigger"
-        aria-label={`Options for ${trackLabel}`}
-        title={`Options for ${trackLabel}`}
-        aria-expanded={isOpen}
-        aria-haspopup="menu"
-      >
-        <MoreHorizontal className="artist-icon-xs" />
-      </button>
-      {isOpen ? (
+    <LibraryItemMenu
+      label={trackLabel}
+      items={actionItems}
+      additionalItemsAfter={additionalItemsAfter}
+      onMenuOpen={() => {
+        setOpenSubmenu(null);
+        playlistMenuProps?.onLoadPlaylists?.();
+      }}
+      renderAdditionalItems={({ closeMenu }) => (
         <>
-          <button
-            type="button"
-            className="artist-backdrop-button"
-            onClick={close}
-            aria-label="Close track menu"
-          />
-          <div
-            className="artist-floating-menu flow-page__track-menu-dropdown"
-            style={{
-              top: menuPosition?.top ?? 0,
-              left: menuPosition?.left ?? 0,
-            }}
-            role="menu"
-          >
-            {canReSearch ? (
-              <button
-                type="button"
-                role="menuitem"
-                className="artist-menu-item"
-                disabled={isReSearching}
-                onClick={() => {
-                  onReSearch?.(track);
-                  close();
-                }}
-              >
-                <span className="artist-menu-item__main">
-                  {isReSearching ? (
-                    <Loader2 className="artist-icon-sm animate-spin" />
-                  ) : (
-                    <Search className="artist-icon-sm" />
-                  )}
-                  {track.status === "done" ? "Search for upgrade" : "Re-search"}
-                </span>
-              </button>
-            ) : null}
-            {playlistMenuProps?.onAddTrackToPlaylist ? (
+          {playlistMenuProps?.onAddTrackToPlaylist ? (
+            <>
+              <div className="native-library-item-menu__separator" />
               <TrackPlaylistSubmenu
                 label="Add to playlist"
                 icon={Plus}
@@ -302,63 +310,38 @@ function FlowTrackKebabMenu({
                 defaultNewPlaylistName={playlistMenuProps.defaultNewPlaylistName}
                 excludedPlaylistIds={playlistMenuProps.excludedPlaylistIds}
                 onSelect={playlistMenuProps.onAddTrackToPlaylist}
-                onClose={close}
+                onClose={closeMenu}
                 toggleOnClick
                 isOpen={openSubmenu === "add"}
                 onToggle={() =>
-                  setOpenSubmenu((current) =>
-                    current === "add" ? null : "add",
-                  )
+                  setOpenSubmenu((current) => (current === "add" ? null : "add"))
                 }
               />
-            ) : null}
-            {playlistMenuProps?.onMoveTrackToPlaylist ? (
-              <TrackPlaylistSubmenu
-                label="Move to playlist"
-                icon={ListMusic}
-                track={playlistMenuProps.track}
-                playlists={playlistMenuProps.playlists}
-                loading={playlistMenuProps.loading}
-                saving={playlistMenuProps.saving}
-                error={playlistMenuProps.error}
-                defaultNewPlaylistName={playlistMenuProps.defaultNewPlaylistName}
-                excludedPlaylistIds={playlistMenuProps.excludedPlaylistIds}
-                onSelect={playlistMenuProps.onMoveTrackToPlaylist}
-                onClose={close}
-                toggleOnClick
-                isOpen={openSubmenu === "move"}
-                onToggle={() =>
-                  setOpenSubmenu((current) =>
-                    current === "move" ? null : "move",
-                  )
-                }
-              />
-            ) : null}
-            {canDelete ? (
-              <button
-                type="button"
-                role="menuitem"
-                className="artist-menu-item artist-menu-item--danger"
-                disabled={isDeleting}
-                onClick={() => {
-                  onDelete?.(track);
-                  close();
-                }}
-              >
-                <span className="artist-menu-item__main">
-                  {isDeleting ? (
-                    <Loader2 className="artist-icon-sm animate-spin" />
-                  ) : (
-                    <Trash2 className="artist-icon-sm" />
-                  )}
-                  Remove from playlist
-                </span>
-              </button>
-            ) : null}
-          </div>
+            </>
+          ) : null}
+          {playlistMenuProps?.onMoveTrackToPlaylist ? (
+            <TrackPlaylistSubmenu
+              label="Move to playlist"
+              icon={ListMusic}
+              track={playlistMenuProps.track}
+              playlists={playlistMenuProps.playlists}
+              loading={playlistMenuProps.loading}
+              saving={playlistMenuProps.saving}
+              error={playlistMenuProps.error}
+              defaultNewPlaylistName={playlistMenuProps.defaultNewPlaylistName}
+              excludedPlaylistIds={playlistMenuProps.excludedPlaylistIds}
+              onSelect={playlistMenuProps.onMoveTrackToPlaylist}
+              onClose={closeMenu}
+              toggleOnClick
+              isOpen={openSubmenu === "move"}
+              onToggle={() =>
+                setOpenSubmenu((current) => (current === "move" ? null : "move"))
+              }
+            />
+          ) : null}
         </>
-      ) : null}
-    </div>
+      )}
+    />
   );
 }
 
@@ -368,7 +351,7 @@ function TrackStatusDot({ status }) {
   const normalized = String(status || "").toLowerCase();
   const isLinkable = normalized !== "done";
   if (isLinkable) {
-    const targetPath = normalized === "blocked" ? "/activity/review" : "/activity/queue";
+    const targetPath = "/activity/queue";
     return (
       <Link
         to={targetPath}
@@ -379,12 +362,13 @@ function TrackStatusDot({ status }) {
     );
   }
   return (
-    <span
-      className={`flow-page__track-status-dot ${meta.className}`}
-      title={meta.label}
-      aria-label={meta.label}
-      role="img"
-    />
+    <Tooltip content={meta.label}>
+      <span
+        className={`flow-page__track-status-dot ${meta.className}`}
+        aria-label={meta.label}
+        role="img"
+      />
+    </Tooltip>
   );
 }
 
@@ -441,12 +425,25 @@ export function FlowTracksPanel({
   onDeleteTrack,
   onAddTrackToPlaylist,
   onMoveTrackToPlaylist,
+  onAddTrackToLibrary,
+  libraryTrackSavingKey = "",
+  getTrackFavoriteId,
+  favoriteTrackIds = new Set(),
+  favoriteTrackSavingKey = "",
+  onToggleFavorite,
   onNavigateArtist,
+  onNavigateAlbum,
   onReSearchTrack,
   playbackSource = null,
   showPlaybackControls = true,
+  trackTitleLabel = "Song",
+  showTrackArtwork = false,
+  showTrackAvailability = false,
+  artworkByAlbumMbid = {},
+  showDuration = false,
   hideAlbumColumn = false,
   hideStatusColumn = false,
+  hideQualityColumn = false,
   allowBulkEdit = false,
   onBulkDelete,
   onBulkReSearch,
@@ -537,6 +534,7 @@ export function FlowTracksPanel({
   };
 
   const isSourceActive = matchesSource(playbackSource);
+  const recordHistory = playbackSource?.recordHistory !== false;
   const currentTrackId =
     isSourceActive && activeTrack?.id ? activeTrack.id : null;
   const isCurrentPlaying = isSourceActive && isPlaying;
@@ -549,7 +547,9 @@ export function FlowTracksPanel({
       togglePlayPause();
       return;
     }
-    const queueTracks = playableTracks.map((track) => normalizeFlowTrack(track));
+    const queueTracks = playableTracks.map((track) =>
+      normalizeFlowTrack(track, { recordHistory }),
+    );
     playQueue(queueTracks, {
       source: playbackSource,
       shuffle: false,
@@ -558,7 +558,9 @@ export function FlowTracksPanel({
 
   const handleShufflePlay = () => {
     if (playableTracks.length === 0) return;
-    const queueTracks = playableTracks.map((track) => normalizeFlowTrack(track));
+    const queueTracks = playableTracks.map((track) =>
+      normalizeFlowTrack(track, { recordHistory }),
+    );
     playQueue(queueTracks, {
       source: playbackSource,
       shuffle: true,
@@ -567,14 +569,16 @@ export function FlowTracksPanel({
 
   const handlePlayTrack = (track) => {
     if (!track?.streamUrl) return;
-    const normalized = normalizeFlowTrack(track);
+    const normalized = normalizeFlowTrack(track, { recordHistory });
     if (currentTrackId === track.id && isSourceActive) {
       togglePlayPause();
       return;
     }
     playTrack(normalized, {
       source: playbackSource,
-      queue: playableTracks.map((entry) => normalizeFlowTrack(entry)),
+      queue: playableTracks.map((entry) =>
+        normalizeFlowTrack(entry, { recordHistory }),
+      ),
       shuffle: isShuffleEnabled,
     });
   };
@@ -585,7 +589,7 @@ export function FlowTracksPanel({
         <div className="flow-page__tracks-toolbar">
           {showPlaybackControls ? (
             <div className="flow-page__tracks-toolbar-start">
-              <button
+              <TooltipButton
                 type="button"
                 onClick={handlePrimaryPlay}
                 className="btn btn-accent btn-round-lg"
@@ -600,8 +604,8 @@ export function FlowTracksPanel({
                 ) : (
                   <Play className="artist-icon-md" />
                 )}
-              </button>
-              <button
+              </TooltipButton>
+              <TooltipButton
                 type="button"
                 onClick={handleShufflePlay}
                 className={`btn btn-secondary btn-round-lg flow-page__tracks-toolbar-shuffle${isShuffleEnabled ? " is-active" : ""}`}
@@ -610,7 +614,7 @@ export function FlowTracksPanel({
                 title="Shuffle and play"
               >
                 <Shuffle className="artist-icon-md" />
-              </button>
+              </TooltipButton>
             </div>
           ) : null}
           <div className="flow-page__tracks-toolbar-actions">
@@ -622,7 +626,7 @@ export function FlowTracksPanel({
                   </span>
                 ) : null}
                 {onBulkDelete ? (
-                  <button
+                  <TooltipButton
                     type="button"
                     onClick={() => onBulkDelete(selectedTracks)}
                     className="btn btn-ghost-danger btn-icon btn-sm"
@@ -631,7 +635,7 @@ export function FlowTracksPanel({
                     title="Remove selected"
                   >
                     <Trash2 className="artist-icon-sm" />
-                  </button>
+                  </TooltipButton>
                 ) : null}
                 {onBulkReSearch ? (
                   <button
@@ -696,7 +700,7 @@ export function FlowTracksPanel({
             ) : (
               <>
                 {allowBulkEdit ? (
-                  <button
+                  <TooltipButton
                     type="button"
                     onClick={() => setEditMode(true)}
                     className="btn btn-secondary btn-icon btn-sm"
@@ -704,7 +708,7 @@ export function FlowTracksPanel({
                     title="Edit tracks"
                   >
                     <Pencil className="artist-icon-sm" />
-                  </button>
+                  </TooltipButton>
                 ) : null}
               </>
             )}
@@ -715,7 +719,7 @@ export function FlowTracksPanel({
       <div className="flow-page__tracks-body">
         {loading && (
           <div className="flow-page__tracks-loading">
-            <Loader2 className="artist-icon-sm animate-spin" />
+            <DotLoader size="sm" label={null} />
             Loading tracks...
           </div>
         )}
@@ -726,7 +730,7 @@ export function FlowTracksPanel({
           <div className="flow-page__tracks-empty">
             {activityHint ? (
               <>
-                <Loader2 className="artist-icon-sm animate-spin" />
+                <DotLoader size="sm" label={null} />
                 <span>{activityHint}</span>
               </>
             ) : (
@@ -760,8 +764,11 @@ export function FlowTracksPanel({
                     className="flow-page__tracks-table-index"
                   />
                 )}
+                {showTrackArtwork ? (
+                  <th className="flow-page__tracks-table-artwork" aria-hidden="true" />
+                ) : null}
                 <FlowTracksSortHeader
-                  label="Song"
+                  label={trackTitleLabel}
                   sortKey="song"
                   activeSortKey={sortKey}
                   sortDirection={sortDirection}
@@ -786,6 +793,11 @@ export function FlowTracksPanel({
                     className="flow-page__tracks-table-album"
                   />
                 )}
+                {showDuration ? (
+                  <th className="flow-page__tracks-table-duration" scope="col">
+                    Time
+                  </th>
+                ) : null}
                 {hideStatusColumn ? null : (
                   <FlowTracksSortHeader
                     label={<span className="sr-only">Status</span>}
@@ -796,9 +808,11 @@ export function FlowTracksPanel({
                     className="flow-page__tracks-table-status-head"
                   />
                 )}
-                <th className="flow-page__tracks-table-quality-head" scope="col">
-                  Quality
-                </th>
+                {hideQualityColumn ? null : (
+                  <th className="flow-page__tracks-table-quality-head" scope="col">
+                    Quality
+                  </th>
+                )}
                 <th
                   className="flow-page__tracks-table-actions-head"
                   aria-hidden="true"
@@ -820,21 +834,27 @@ export function FlowTracksPanel({
                   !!track.streamUrl;
                 const canDelete =
                   typeof onDeleteTrack === "function" && !!track.id;
+                const searchAction = getTrackSearchAction(track, showTrackAvailability);
                 const canReSearch =
                   typeof onReSearchTrack === "function" &&
                   !!track.id &&
-                  (track.status === "failed" ||
-                    track.status === "done" &&
-                      track.qualityOwned === true &&
-                      track.qualityState !== "preferred");
+                  searchAction !== null;
                 const isReSearching = reSearchingTrackIds[track.id] === true;
+                const availability = showTrackAvailability ? getTrackAvailability(track) : null;
                 const isDeleting = deletingTrackId === track.id;
                 const isCurrent = track.id === currentTrackId && isCurrentPlaying;
-                const quality = getTrackQualityMeta(track);
+                const trackFavoriteId = getTrackFavoriteId?.(track) || "";
+                const quality = hideQualityColumn ? null : getTrackQualityMeta(track);
+                const artworkUrl =
+                  track.artworkUrl ||
+                  track.coverUrl ||
+                  artworkByAlbumMbid[String(track.albumMbid || "")] ||
+                  "";
                 return (
                   <tr
                     key={track.id}
                     className={`flow-page__tracks-table-row${isCurrent ? " is-current" : ""}`}
+                    data-library-menu-target={useTrackContextMenu ? "true" : undefined}
                   >
                     <td className="flow-page__tracks-table-index">
                       {editMode ? (
@@ -852,7 +872,7 @@ export function FlowTracksPanel({
                           <span className="flow-page__tracks-table-index-number">
                             {trackDisplayNumber}
                           </span>
-                          <button
+                          <TooltipButton
                             type="button"
                             onClick={() => handlePlayTrack(track)}
                             className="flow-page__tracks-table-index-play btn btn-secondary btn-icon btn-xs"
@@ -873,61 +893,103 @@ export function FlowTracksPanel({
                             ) : (
                               <Play className="artist-icon-xs" />
                             )}
-                          </button>
+                          </TooltipButton>
                         </div>
                       ) : (
                         trackDisplayNumber
                       )}
                     </td>
-                    <td
-                      className="flow-page__tracks-table-song"
-                      title={track.trackName}
-                    >
-                      <span className="flow-page__tracks-table-cell-text">
-                        {track.trackName}
-                      </span>
-                    </td>
-                    <td
-                      className="flow-page__tracks-table-artist"
-                      title={track.artistName}
-                    >
-                      {track.artistMbid ? (
-                        <button
-                          type="button"
-                          onClick={() => onNavigateArtist(track)}
-                          className="flow-page__tracks-artist-link"
-                        >
-                          {track.artistName}
-                        </button>
-                      ) : (
-                        <span className="flow-page__tracks-table-cell-text">
-                          {track.artistName}
-                        </span>
-                      )}
-                    </td>
-                    {hideAlbumColumn ? null : (
+                    {showTrackArtwork ? (
+                      <td className="flow-page__tracks-table-artwork">
+                        <PlaylistArtworkThumb
+                          artworkUrl={artworkUrl}
+                          name={track.albumName || track.trackName}
+                          className="flow-page__tracks-table-artwork-thumb"
+                        />
+                      </td>
+                    ) : null}
+                    <Tooltip content={showTrackAvailability ? undefined : track.trackName}>
                       <td
-                        className="flow-page__tracks-table-album"
-                        title={track.albumName || "Unknown Album"}
+                        className="flow-page__tracks-table-song"
                       >
-                        <span className="flow-page__tracks-table-cell-text">
-                          {track.albumName || "Unknown Album"}
+                        <span className={showTrackAvailability ? "flow-page__track-title-availability" : undefined}>
+                          {showTrackAvailability ? (
+                            <TooltipButton
+                              className="flow-page__track-availability-indicator"
+                              label={availability.label}
+                            >
+                              <span
+                                className={`flow-page__track-status-dot flow-page__track-status-dot--${availability.status}`}
+                                aria-hidden="true"
+                              />
+                            </TooltipButton>
+                          ) : null}
+                          <Tooltip content={showTrackAvailability ? track.trackName : undefined}>
+                            <span className="flow-page__tracks-table-cell-text" >{track.trackName}</span>
+                          </Tooltip>
                         </span>
                       </td>
+                    </Tooltip>
+                    <Tooltip content={track.artistName}>
+                      <td
+                        className="flow-page__tracks-table-artist"
+                      >
+                        {track.artistMbid ? (
+                          <button
+                            type="button"
+                            onClick={() => onNavigateArtist(track)}
+                            className="flow-page__tracks-artist-link"
+                          >
+                            {track.artistName}
+                          </button>
+                        ) : (
+                          <span className="flow-page__tracks-table-cell-text">
+                            {track.artistName}
+                          </span>
+                        )}
+                      </td>
+                    </Tooltip>
+                    {hideAlbumColumn ? null : (
+                      <Tooltip content={track.albumName || "Unknown Album"}>
+                        <td
+                          className="flow-page__tracks-table-album"
+                        >
+                          {track.albumMbid && typeof onNavigateAlbum === "function" ? (
+                            <button
+                              type="button"
+                              onClick={() => onNavigateAlbum(track)}
+                              className="flow-page__tracks-album-link"
+                            >
+                              {track.albumName || "Unknown Album"}
+                            </button>
+                          ) : (
+                            <span className="flow-page__tracks-table-cell-text">
+                              {track.albumName || "Unknown Album"}
+                            </span>
+                          )}
+                        </td>
+                      </Tooltip>
                     )}
+                    {showDuration ? (
+                      <td className="flow-page__tracks-table-duration">
+                        {formatTrackDuration(track.durationMs)}
+                      </td>
+                    ) : null}
                     {hideStatusColumn ? null : (
                       <td className="flow-page__tracks-table-status-cell">
                         <TrackStatusDot status={track.status} />
                       </td>
                     )}
-                    <td className="flow-page__tracks-table-quality-cell">
-                      <span className="flow-page__tracks-table-cell-text">{quality.label}</span>
-                      {quality.state ? (
-                        <span className={`flow-page__quality-state flow-page__quality-state--${track.qualityState}`}>
-                          {quality.state}
-                        </span>
-                      ) : null}
-                    </td>
+                    {hideQualityColumn ? null : (
+                      <td className="flow-page__tracks-table-quality-cell">
+                        <span className="flow-page__tracks-table-cell-text">{quality.label}</span>
+                        {quality.state ? (
+                          <span className={`flow-page__quality-state flow-page__quality-state--${track.qualityState}`}>
+                            {quality.state}
+                          </span>
+                        ) : null}
+                      </td>
+                    )}
                     <td className="flow-page__tracks-table-actions-cell">
                       {editMode ? null : (
                       <div className="flow-page__tracks-actions">
@@ -949,7 +1011,18 @@ export function FlowTracksPanel({
                             useTrackContextMenu ? (
                               <FlowTrackKebabMenu
                                 track={track}
+                                canPlay={canPlay}
+                                isPlaying={isCurrent}
+                                onPlay={handlePlayTrack}
+                                onAddToLibrary={onAddTrackToLibrary}
+                                isAddingToLibrary={libraryTrackSavingKey === String(track.id)}
+                                isFavorite={favoriteTrackIds.has(trackFavoriteId)}
+                                isFavoritePending={favoriteTrackSavingKey === trackFavoriteId}
+                                onToggleFavorite={onToggleFavorite}
+                                onNavigateAlbum={onNavigateAlbum}
+                                onNavigateArtist={onNavigateArtist}
                                 canReSearch={canReSearch}
+                                searchAction={searchAction}
                                 isReSearching={isReSearching}
                                 canDelete={canDelete}
                                 isDeleting={isDeleting}
@@ -962,23 +1035,23 @@ export function FlowTracksPanel({
                             ) : (
                               <>
                                 {canReSearch ? (
-                                  <button
+                                  <TooltipButton
                                     type="button"
                                     onClick={() => onReSearchTrack(track)}
                                     className="btn btn-secondary btn-icon btn-xs"
-                                    aria-label={`${track.status === "done" ? "Search for an upgrade to" : "Re-search"} ${track.trackName}`}
-                                    title={`${track.status === "done" ? "Search for an upgrade to" : "Re-search"} ${track.trackName}`}
+                                    aria-label={`${searchAction === "upgrade" ? "Search for an upgrade to" : "Re-search"} ${track.trackName}`}
+                                    title={`${searchAction === "upgrade" ? "Search for an upgrade to" : "Re-search"} ${track.trackName}`}
                                     disabled={isReSearching}
                                   >
                                     {isReSearching ? (
-                                      <Loader2 className="artist-icon-xs animate-spin" />
+                                      <DotLoader size="xs" label={null} />
                                     ) : (
                                       <Search className="artist-icon-xs" />
                                     )}
-                                  </button>
+                                  </TooltipButton>
                                 ) : null}
                                 {canDelete ? (
-                                  <button
+                                  <TooltipButton
                                     type="button"
                                     onClick={() => onDeleteTrack?.(track)}
                                     className="btn btn-ghost-danger btn-icon btn-xs"
@@ -987,11 +1060,11 @@ export function FlowTracksPanel({
                                     disabled={isDeleting}
                                   >
                                     {isDeleting ? (
-                                      <Loader2 className="artist-icon-xs animate-spin" />
+                                      <DotLoader size="xs" label={null} />
                                     ) : (
                                       <Trash2 className="artist-icon-xs" />
                                     )}
-                                  </button>
+                                  </TooltipButton>
                                 ) : null}
                               </>
                             )

@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import {
   CalendarDays,
@@ -17,6 +18,10 @@ import {
 import { readStoredNearbyLocation } from "../pages/discoverUtils.js";
 import { useAuth } from "../contexts/AuthContext.jsx";
 import { useToast } from "../contexts/ToastContext";
+import TooltipButton from "./TooltipButton";
+import { DotLoader } from "./DotLoader";
+import { queryClient, queryKeys } from "../queryClient.js";
+import Tooltip from "./Tooltip";
 
 const ITEM_ICONS = {
   release: Music2,
@@ -118,16 +123,17 @@ function InboxItem({ item, onRemove, onOpen, pendingAction }) {
         </button>
       )}
       <span className="app-inbox-menu__item-actions">
-        <button
-          type="button"
-          className="app-inbox-menu__item-action"
-          aria-label={`Remove ${item.title} from Inbox`}
-          title="Remove from Inbox"
-          disabled={isPending}
-          onClick={() => onRemove(item)}
-        >
-          <Check aria-hidden="true" />
-        </button>
+        <Tooltip content="Remove from Inbox">
+          <button
+            type="button"
+            className="app-inbox-menu__item-action"
+            aria-label={`Remove ${item.title} from Inbox`}
+            disabled={isPending}
+            onClick={() => onRemove(item)}
+          >
+            <Check aria-hidden="true" />
+          </button>
+        </Tooltip>
       </span>
     </li>
   );
@@ -135,14 +141,11 @@ function InboxItem({ item, onRemove, onOpen, pendingAction }) {
 
 function InboxMenu() {
   const [open, setOpen] = useState(false);
-  const [items, setItems] = useState([]);
-  const [unreadCount, setUnreadCount] = useState(0);
-  const [loading, setLoading] = useState(false);
-  const [serverRefreshing, setServerRefreshing] = useState(false);
   const [filter, setFilter] = useState("all");
   const [filterOpen, setFilterOpen] = useState(false);
   const [pendingActions, setPendingActions] = useState({});
   const menuRef = useRef(null);
+  const triggerRef = useRef(null);
   const { user, bootstrap } = useAuth();
   const [inboxEnabled, setInboxEnabled] = useState(true);
   const { showError } = useToast();
@@ -159,28 +162,58 @@ function InboxMenu() {
     return () => window.removeEventListener("aurral:settings-updated", handleSettingsUpdated);
   }, []);
 
-  const loadInbox = useCallback(async () => {
-    setLoading(true);
-    try {
-      const { mode, zip } = readStoredNearbyLocation();
-      const locationZip = mode === "zip" ? zip : "";
-      const result = await getInbox({ zip: locationZip, limit: 50 });
-      setItems(Array.isArray(result?.items) ? result.items : []);
-      setUnreadCount(Number(result?.unreadCount || 0));
-      setServerRefreshing(result?.refreshing === true);
-    } catch {
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!inboxEnabled) return undefined;
-    if (!Number.isInteger(Number(user?.id)) || Number(user.id) <= 0) return undefined;
-    loadInbox();
-    const interval = window.setInterval(loadInbox, 60 * 1000);
-    return () => window.clearInterval(interval);
-  }, [inboxEnabled, loadInbox, user?.id]);
+  const { mode, zip } = readStoredNearbyLocation();
+  const locationZip = mode === "zip" ? zip : "";
+  const userId = Number.isInteger(Number(user?.id)) && Number(user.id) > 0 ? user.id : null;
+  const queryKey = queryKeys.inbox(userId, locationZip, 50);
+  const inboxQuery = useQuery({
+    queryKey,
+    queryFn: ({ signal }) => getInbox({ zip: locationZip, limit: 50, signal }),
+    enabled: inboxEnabled && userId != null,
+    refetchInterval: 60 * 1000,
+    staleTime: 30 * 1000,
+  });
+  const items = Array.isArray(inboxQuery.data?.items) ? inboxQuery.data.items : [];
+  const unreadCount = Number(inboxQuery.data?.unreadCount || 0);
+  const serverRefreshing = inboxQuery.data?.refreshing === true;
+  const loadInbox = () => inboxQuery.refetch();
+  const itemMutation = useMutation({
+    mutationFn: ({ id, action }) => updateInboxItem(id, action),
+    onMutate: async ({ id, action }) => {
+      await queryClient.cancelQueries({ queryKey });
+      const previous = queryClient.getQueryData(queryKey);
+      queryClient.setQueryData(queryKey, (current) => {
+        if (!current) return current;
+        const item = current.items?.find((entry) => entry.id === id);
+        if (!item) return current;
+        if (action === "dismiss") {
+          return {
+            ...current,
+            items: current.items.filter((entry) => entry.id !== id),
+            unreadCount: Math.max(0, Number(current.unreadCount || 0) - (item.isRead ? 0 : 1)),
+          };
+        }
+        return {
+          ...current,
+          items: current.items.map((entry) =>
+            entry.id === id ? { ...entry, isRead: true } : entry,
+          ),
+          unreadCount: Math.max(0, Number(current.unreadCount || 0) - (item.isRead ? 0 : 1)),
+        };
+      });
+      return { previous };
+    },
+    onError: (_error, _variables, context) => {
+      if (context?.previous !== undefined) {
+        queryClient.setQueryData(queryKey, context.previous);
+      }
+    },
+    onSettled: () => queryClient.invalidateQueries({ queryKey }),
+  });
+  const readAllMutation = useMutation({
+    mutationFn: markAllInboxItemsRead,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey }),
+  });
 
   useEffect(() => {
     if (!open) return undefined;
@@ -194,6 +227,7 @@ function InboxMenu() {
       if (event.key === "Escape") {
         setFilterOpen(false);
         setOpen(false);
+        triggerRef.current?.focus();
       }
     };
     document.addEventListener("mousedown", handleOutsideClick);
@@ -206,11 +240,7 @@ function InboxMenu() {
 
   const handleOpen = (item) => {
     if (!item.isRead) {
-      setItems((current) => current.map((entry) => (
-        entry.id === item.id ? { ...entry, isRead: true } : entry
-      )));
-      setUnreadCount((count) => Math.max(0, count - 1));
-      void updateInboxItem(item.id, "read").catch((error) => {
+      void itemMutation.mutateAsync({ id: item.id, action: "read" }).catch((error) => {
         showError(error?.response?.data?.error || error?.message || `Failed to read ${item.title}`);
       });
     }
@@ -221,9 +251,7 @@ function InboxMenu() {
     const actionKey = `${item.id}:dismiss`;
     setPendingActions((current) => ({ ...current, [actionKey]: "dismiss" }));
     try {
-      await updateInboxItem(item.id, "dismiss");
-      setItems((current) => current.filter((entry) => entry.id !== item.id));
-      if (!item.isRead) setUnreadCount((count) => Math.max(0, count - 1));
+      await itemMutation.mutateAsync({ id: item.id, action: "dismiss" });
     } catch (error) {
       showError(
         error?.response?.data?.message ||
@@ -242,7 +270,7 @@ function InboxMenu() {
 
   const handleReadAll = async () => {
     try {
-      await markAllInboxItemsRead();
+      await readAllMutation.mutateAsync();
     } catch (error) {
       showError(
         error?.response?.data?.message ||
@@ -252,7 +280,6 @@ function InboxMenu() {
       );
       return;
     }
-    await loadInbox();
   };
 
   const visibleItems = filter === "all" ? items : items.filter((item) => item.kind === filter);
@@ -262,36 +289,40 @@ function InboxMenu() {
 
   return (
     <div ref={menuRef} className="app-inbox-menu">
-      <button
-        type="button"
+      <TooltipButton
+        ref={triggerRef}
+        label={unreadCount ? "Inbox, unread notifications" : "Inbox"}
         className={`app-header-link app-inbox-menu__trigger${open ? " is-open" : ""}${unreadCount > 0 ? " has-unread" : ""}`}
-        aria-haspopup="menu"
+        aria-haspopup="true"
         aria-expanded={open}
-        aria-label={unreadCount ? "Inbox, unread notifications" : "Inbox"}
+        aria-controls="inbox-notifications"
         onClick={() => {
           setOpen((current) => !current);
           if (!open) void loadInbox();
         }}
       >
         <Inbox aria-hidden="true" />
-      </button>
+      </TooltipButton>
 
       {open ? (
-        <div className="app-inbox-menu__dropdown" role="menu">
+        <div
+          id="inbox-notifications"
+          className="app-inbox-menu__dropdown"
+          aria-label="Inbox notifications"
+        >
           <div className="app-inbox-menu__header">
             <span>Inbox</span>
             <span className="app-inbox-menu__header-actions">
-              <button
-                type="button"
+              <TooltipButton
+                label="Filter inbox"
                 className={`app-inbox-menu__header-action${filter !== "all" ? " is-active" : ""}`}
                 aria-label="Filter inbox"
                 aria-haspopup="menu"
                 aria-expanded={filterOpen}
-                title="Filter inbox"
                 onClick={() => setFilterOpen((current) => !current)}
               >
                 <SlidersHorizontal aria-hidden="true" />
-              </button>
+              </TooltipButton>
               {unreadCount > 0 ? (
                 <button type="button" className="app-inbox-menu__read-all" onClick={handleReadAll}>
                   Mark all as read
@@ -318,8 +349,10 @@ function InboxMenu() {
               </div>
             ) : null}
           </div>
-          {(loading || (serverRefreshing && items.length === 0)) ? (
-            <div className="app-inbox-menu__empty">Loading…</div>
+          {(inboxQuery.isPending || (serverRefreshing && items.length === 0)) ? (
+            <div className="app-inbox-menu__empty">
+              <DotLoader size="sm" label={null} /> Loading…
+            </div>
           ) : items.length === 0 ? (
             <div className="app-inbox-menu__empty">Nothing to see here yet</div>
           ) : visibleItems.length === 0 ? (

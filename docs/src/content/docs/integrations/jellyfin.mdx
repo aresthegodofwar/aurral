@@ -1,0 +1,34 @@
+---
+title: Jellyfin
+description: Connect Jellyfin to publish Aurral flow and shared playlists.
+---
+
+Jellyfin is an optional playback destination. Aurral publishes playlists into an existing Jellyfin music library through the Jellyfin API.
+
+## Setup
+
+1. Create a Jellyfin API key with access to the music library.
+2. Open **Settings > Playback > Jellyfin** in Aurral.
+3. Enter the Jellyfin server URL, API key, and a default Jellyfin user ID. The default is used for legacy playlists without an Aurral owner.
+4. Add a **Jellyfin** path mapping when Aurral and Jellyfin use different filesystem paths.
+5. Select **Test connection**.
+
+Aurral creates or updates playlists for enabled flows and shared playlists when settings are saved or a playlist changes. It removes playlists that Aurral previously created when the corresponding flow or shared playlist is deleted or disabled.
+
+For owner-scoped playlists, Aurral matches the Aurral username to a Jellyfin username using an exact, case-insensitive comparison. It creates a private playlist owned by the matching Jellyfin user. If no matching user exists, the playlist is not published to Jellyfin.
+
+## Playlist edits in Jellyfin
+
+You can add songs directly to a playlist in Jellyfin or a client such as Feishin. Aurral keeps those additions when it updates the playlist, but they do not appear in Aurral.
+
+To remove a song supplied by Aurral, remove it in Aurral. If you remove it only in Jellyfin, Aurral may add it back during the next update.
+
+Deleting a flow or shared playlist in Aurral, or disabling a flow, also deletes its Jellyfin playlist, including any additions you made to that playlist.
+
+## Matching and scans
+
+Aurral reads the matched Jellyfin user's accessible audio library and matches tracks by exact Jellyfin library path first. It uses a unique MusicBrainz recording ID only when the path does not match. It does not use title or artist guesses. Only matched tracks are published, so unavailable tracks do not prevent the rest of a playlist from syncing.
+
+Changing Jellyfin settings refreshes playlists and schedules a library scan in the background, without making the settings save wait for library indexing. Saving unrelated settings does not trigger this refresh. The normal library scan request also refreshes the Jellyfin library. If Jellyfin is still indexing files, Aurral retries incomplete playlists during the next few minutes.
+
+The Jellyfin integration does not start playback sessions or create a Jellyfin library. Keep the same music library available to both Aurral and Jellyfin, or configure the path mapping.

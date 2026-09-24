@@ -1,15 +1,12 @@
 import { useState } from "react";
 import {
-  getLidarrRootFolders,
-  getLidarrMetadataProfiles,
-  getLidarrProfiles,
-  getLidarrTags,
   testLidarrConnection,
 } from "../../../utils/api/endpoints/settings.js";
 
 import { Link } from "react-router-dom";
 import { RefreshCw } from "lucide-react";
 import PillToggle from "../../../components/PillToggle";
+import { DotLoader } from "../../../components/DotLoader";
 import { SettingsInput, SettingsSelect } from "./SettingsField";
 import { SettingsArrFieldSet, SettingsArrFormGroup } from "./arr/SettingsArrLayout";
 export function LidarrSettingsSection({
@@ -18,20 +15,13 @@ export function LidarrSettingsSection({
   health,
   lidarrRootFolders,
   loadingLidarrRootFolders,
-  setLoadingLidarrRootFolders,
-  setLidarrRootFolders,
   lidarrProfiles,
   loadingLidarrProfiles,
-  setLoadingLidarrProfiles,
-  setLidarrProfiles,
   lidarrMetadataProfiles,
   loadingLidarrMetadataProfiles,
-  setLoadingLidarrMetadataProfiles,
-  setLidarrMetadataProfiles,
   lidarrTags,
   loadingLidarrTags,
-  setLoadingLidarrTags,
-  setLidarrTags,
+  refreshLidarrResources,
   testingLidarr,
   setTestingLidarr,
   applyingCommunityGuide,
@@ -41,6 +31,7 @@ export function LidarrSettingsSection({
   showInfo,
 }) {
   const [lidarrTestLatencyMs, setLidarrTestLatencyMs] = useState(null);
+  const [lidarrTestStatus, setLidarrTestStatus] = useState(null);
 
   const safeLidarrRootFolders = Array.isArray(lidarrRootFolders) ? lidarrRootFolders : [];
   const safeLidarrProfiles = Array.isArray(lidarrProfiles) ? lidarrProfiles : [];
@@ -65,36 +56,29 @@ export function LidarrSettingsSection({
     const url = settings.integrations?.lidarr?.url;
     const apiKey = settings.integrations?.lidarr?.apiKey;
     if (!url || !apiKey) {
+      setLidarrTestStatus({ tone: "error", message: "Enter the URL and API key." });
       showError("Please enter both URL and API key");
       return;
     }
     setTestingLidarr(true);
     setLidarrTestLatencyMs(null);
+    setLidarrTestStatus(null);
     const startTime = performance.now();
     try {
       const result = await testLidarrConnection(url, apiKey);
       setLidarrTestLatencyMs(Math.round(performance.now() - startTime));
       if (result.success) {
+        setLidarrTestStatus({ tone: "success", message: "Connected." });
         showSuccess(`Lidarr connection successful! (${result.instanceName || "Lidarr"})`);
-        setLoadingLidarrRootFolders(true);
-        setLoadingLidarrProfiles(true);
-        setLoadingLidarrMetadataProfiles(true);
-        setLoadingLidarrTags(true);
         try {
-          const [rootFolders, profiles, metadataProfiles, tags] = await Promise.all([
-            getLidarrRootFolders(url, apiKey),
-            getLidarrProfiles(url, apiKey),
-            getLidarrMetadataProfiles(url, apiKey),
-            getLidarrTags(url, apiKey),
-          ]);
+          const [rootFolders, profiles, metadataProfiles, tags] = await refreshLidarrResources({
+            url,
+            apiKey,
+          });
           const nextRootFolders = Array.isArray(rootFolders) ? rootFolders : [];
           const nextProfiles = Array.isArray(profiles) ? profiles : [];
           const nextMetadataProfiles = Array.isArray(metadataProfiles) ? metadataProfiles : [];
           const nextTags = Array.isArray(tags) ? tags : [];
-          setLidarrRootFolders(nextRootFolders);
-          setLidarrProfiles(nextProfiles);
-          setLidarrMetadataProfiles(nextMetadataProfiles);
-          setLidarrTags(nextTags);
           if (nextRootFolders.length > 0) {
             showInfo(`Loaded ${nextRootFolders.length} root folder(s)`);
           }
@@ -107,20 +91,23 @@ export function LidarrSettingsSection({
           if (nextTags.length > 0) {
             showInfo(`Loaded ${nextTags.length} tag(s)`);
           }
-        } catch {
-        } finally {
-          setLoadingLidarrRootFolders(false);
-          setLoadingLidarrProfiles(false);
-          setLoadingLidarrMetadataProfiles(false);
-          setLoadingLidarrTags(false);
+        } catch (err) {
+          const errorMsg =
+            err.response?.data?.message ||
+            err.response?.data?.error ||
+            err.message ||
+            "Failed to load Lidarr resources";
+          showError(`Connected, but failed to load Lidarr resources: ${errorMsg}`);
         }
       } else {
+        setLidarrTestStatus({ tone: "error", message: "Connection failed. Check the URL and API key, then retry." });
         showError(
           `Connection failed: ${result.message || result.error}${result.details ? `\n${result.details}` : ""}`,
         );
       }
     } catch (err) {
       setLidarrTestLatencyMs(Math.round(performance.now() - startTime));
+      setLidarrTestStatus({ tone: "error", message: "Connection failed. Check the URL and API key, then retry." });
       const errorMsg = err.response?.data?.message || err.response?.data?.error || err.message;
       showError(`Connection failed: ${errorMsg}`);
     } finally {
@@ -138,25 +125,15 @@ export function LidarrSettingsSection({
       showError("Please enter Lidarr URL and API key first");
       return;
     }
-    setLoadingLidarrRootFolders(true);
-    setLoadingLidarrProfiles(true);
-    setLoadingLidarrMetadataProfiles(true);
-    setLoadingLidarrTags(true);
     try {
-      const [rootFolders, profiles, metadataProfiles, tags] = await Promise.all([
-        getLidarrRootFolders(url, apiKey),
-        getLidarrProfiles(url, apiKey),
-        getLidarrMetadataProfiles(url, apiKey),
-        getLidarrTags(url, apiKey),
-      ]);
+      const [rootFolders, profiles, metadataProfiles, tags] = await refreshLidarrResources({
+        url,
+        apiKey,
+      });
       const nextRootFolders = Array.isArray(rootFolders) ? rootFolders : [];
       const nextProfiles = Array.isArray(profiles) ? profiles : [];
       const nextMetadataProfiles = Array.isArray(metadataProfiles) ? metadataProfiles : [];
       const nextTags = Array.isArray(tags) ? tags : [];
-      setLidarrRootFolders(nextRootFolders);
-      setLidarrProfiles(nextProfiles);
-      setLidarrMetadataProfiles(nextMetadataProfiles);
-      setLidarrTags(nextTags);
       if (nextRootFolders.length === 0 && nextProfiles.length === 0 && nextMetadataProfiles.length === 0 && nextTags.length === 0) {
         showInfo("No root folders, profiles, or tags found in Lidarr");
       } else {
@@ -178,27 +155,11 @@ export function LidarrSettingsSection({
     } catch (err) {
       const errorMsg = err.response?.data?.message || err.response?.data?.error || err.message;
       showError(`Failed to load profiles and tags: ${errorMsg}`);
-    } finally {
-      setLoadingLidarrRootFolders(false);
-      setLoadingLidarrProfiles(false);
-      setLoadingLidarrMetadataProfiles(false);
-      setLoadingLidarrTags(false);
     }
   };
 
   return (
     <>
-      <div className="settings-page__section">
-        <div className="settings-page__section-header">
-          <div className="settings-page__section-intro">
-            <h3 className="settings-page__section-title">Lidarr</h3>
-            <p className="settings-page__section-note">
-              Connect Aurral to your Lidarr instance and configure library defaults.
-            </p>
-          </div>
-        </div>
-      </div>
-
       <SettingsArrFieldSet
         legend="Connection"
         actions={
@@ -213,9 +174,11 @@ export function LidarrSettingsSection({
               }
               className="arr-btn"
             >
-              <RefreshCw
-                className={`artist-icon-sm${refreshingProfilesTags ? " animate-spin" : ""}`}
-              />
+              {refreshingProfilesTags ? (
+                <DotLoader size="sm" label={null} />
+              ) : (
+                <RefreshCw className="artist-icon-sm" aria-hidden />
+              )}
               {refreshingProfilesTags ? "Refreshing..." : "Refresh profiles/tags"}
             </button>
             <button
@@ -228,13 +191,22 @@ export function LidarrSettingsSection({
               }
               className="arr-btn"
             >
+              {testingLidarr ? <DotLoader size="sm" label={null} /> : null}
               {testingLidarr ? "Testing..." : "Test connection"}
             </button>
+            {lidarrTestStatus ? (
+              <span
+                className={`arr-test-result arr-test-result--${lidarrTestStatus.tone}`}
+                role={lidarrTestStatus.tone === "error" ? "alert" : "status"}
+              >
+                {lidarrTestStatus.message}
+              </span>
+            ) : null}
           </>
         }
       >
         <div className="arr-info">
-          Music library manager. File access, mounts, and path mappings are checked in{" "}
+          Music library manager. Path access and mappings are checked in{" "}
           <Link to="/settings/system" className="arr-link">
             System
           </Link>
@@ -250,13 +222,14 @@ export function LidarrSettingsSection({
             value={settings.integrations?.lidarr?.url || ""}
             onChange={(e) => {
               setLidarrTestLatencyMs(null);
+              setLidarrTestStatus(null);
               updateLidarr({ url: e.target.value });
             }}
           />
         </SettingsArrFormGroup>
 
         <SettingsArrFormGroup
-          label="API Key"
+          label="API key"
           labelFor="lidarr-api-key"
           help={
             <>
@@ -275,6 +248,7 @@ export function LidarrSettingsSection({
             value={settings.integrations?.lidarr?.apiKey || ""}
             onChange={(e) => {
               setLidarrTestLatencyMs(null);
+              setLidarrTestStatus(null);
               updateLidarr({ apiKey: e.target.value });
             }}
           />
@@ -297,7 +271,10 @@ export function LidarrSettingsSection({
       </SettingsArrFieldSet>
 
       <SettingsArrFieldSet legend="Defaults">
-        <SettingsArrFormGroup label="Default Root Folder" labelFor="lidarr-root-folder">
+        <p className="arr-form-help">
+          Users can override the root folder and quality profile in Profile.
+        </p>
+        <SettingsArrFormGroup label="Default root folder" labelFor="lidarr-root-folder">
           <SettingsSelect
             id="lidarr-root-folder"
             value={settings.integrations?.lidarr?.rootFolderPath || ""}
@@ -319,13 +296,9 @@ export function LidarrSettingsSection({
               </option>
             ))}
           </SettingsSelect>
-          <p className="settings-page__section-note">
-            Users can set their own default in Profile → Library Defaults, which overrides
-            this instance-wide setting.
-          </p>
         </SettingsArrFormGroup>
 
-        <SettingsArrFormGroup label="Default Quality Profile" labelFor="lidarr-quality-profile">
+        <SettingsArrFormGroup label="Default quality profile" labelFor="lidarr-quality-profile">
           <SettingsSelect
             id="lidarr-quality-profile"
             value={
@@ -353,13 +326,9 @@ export function LidarrSettingsSection({
               </option>
             ))}
           </SettingsSelect>
-          <p className="settings-page__section-note">
-            Users can set their own default in Profile → Library Defaults, which overrides
-            this instance-wide setting.
-          </p>
         </SettingsArrFormGroup>
 
-        <SettingsArrFormGroup label="Default Metadata Profile" labelFor="lidarr-metadata-profile">
+        <SettingsArrFormGroup label="Default metadata profile" labelFor="lidarr-metadata-profile">
           <SettingsSelect
             id="lidarr-metadata-profile"
             value={
@@ -417,28 +386,40 @@ export function LidarrSettingsSection({
           </SettingsSelect>
         </SettingsArrFormGroup>
 
-        <SettingsArrFormGroup label="Default Monitoring Option" labelFor="lidarr-monitor-option">
+        <SettingsArrFormGroup label="Default monitoring option" labelFor="lidarr-monitor-option">
           <SettingsSelect
             id="lidarr-monitor-option"
             value={settings.integrations?.lidarr?.defaultMonitorOption || "none"}
             onChange={(e) => updateLidarr({ defaultMonitorOption: e.target.value })}
           >
-            <option value="none">None (Artist Only)</option>
-            <option value="existing">Existing Albums</option>
-            <option value="all">All Albums</option>
-            <option value="future">Future Albums</option>
-            <option value="missing">Missing Albums</option>
-            <option value="latest">Latest Album</option>
-            <option value="first">First Album</option>
+            <option value="none">None (artist only)</option>
+            <option value="existing">Existing albums</option>
+            <option value="all">All albums</option>
+            <option value="future">Future albums</option>
+            <option value="missing">Missing albums</option>
+            <option value="latest">Latest album</option>
+            <option value="first">First album</option>
           </SettingsSelect>
         </SettingsArrFormGroup>
 
-        <SettingsArrFormGroup label="Search on Add">
+        <SettingsArrFormGroup label="Search on add">
           <PillToggle
             className="settings-toggle"
             checked={settings.integrations?.lidarr?.searchOnAdd || false}
             onChange={(e) => updateLidarr({ searchOnAdd: e.target.checked })}
             aria-label="Search for missing albums when artists are added"
+          />
+        </SettingsArrFormGroup>
+
+        <SettingsArrFormGroup
+          label="Show available music only"
+          help="Hide albums and artists with no downloaded files from the Library. You can still search for and request unmonitored albums. Turn off to browse each artist's full Lidarr discography."
+        >
+          <PillToggle
+            className="settings-toggle"
+            checked={settings.integrations?.lidarr?.availableOnly !== false}
+            onChange={(e) => updateLidarr({ availableOnly: e.target.checked })}
+            aria-label="Show only albums with downloaded files in the Library"
           />
         </SettingsArrFormGroup>
       </SettingsArrFieldSet>
@@ -456,7 +437,8 @@ export function LidarrSettingsSection({
           disabled={applyingCommunityGuide || !health?.lidarrConfigured}
           className="arr-btn arr-btn--primary"
         >
-          {applyingCommunityGuide ? "Applying..." : "Apply Davo's Recommended Settings"}
+          {applyingCommunityGuide ? <DotLoader size="sm" label={null} /> : null}
+          {applyingCommunityGuide ? "Applying..." : "Apply recommended settings"}
         </button>
         <p className="arr-form-help arr-form-help--spaced">
           Creates quality profile, updates quality definitions, adds custom formats, and updates

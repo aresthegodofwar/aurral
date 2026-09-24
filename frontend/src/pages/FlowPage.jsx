@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, lazy, Suspense } from "react";
-import { Check, Loader2, Play, FilePlus2, Download, Trash2, Search, RefreshCw, ClipboardCopy, ListMusic } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import { Check, Play, FilePlus2, Download, Trash2, Search, RefreshCw, ClipboardCopy, ListMusic } from "lucide-react";
+import { DotLoader } from "../components/DotLoader";
 import { useLocation, useNavigate } from "react-router-dom";
 import {
   getFlowJobs,
@@ -19,9 +21,10 @@ import {
   uploadFlowArtwork,
   deleteFlowArtwork,
   generateFlowArtwork,
-  reSearchSharedPlaylistTrack,
   reSearchFlowTrack,
-  reSearchMissingSharedPlaylistTracks,
+  reSearchSharedPlaylistTrack,
+  setPlaylistTrackAvailability,
+  setPlaylistRecordHistory,
   searchTrackUpgrade,
   searchPlaylistUpgrades,
   syncSharedPlaylistImport,
@@ -42,6 +45,21 @@ import {
   isEditorialFlow,
 } from "./flows/flowStats";
 import { getPlaylistRunActivity } from "./flows/flowRunActivity";
+import { countAvailableTracks, getTrackSearchAction } from "./flows/trackAvailability.js";
+import { getReleaseGroupCoversBatch } from "../utils/api/endpoints/artists.js";
+import {
+  getCanonicalLibraryPage,
+  fetchLibraryFavorites,
+  lookupAlbumsInLibraryBatch,
+  lookupArtistInLibrary,
+  updateLibraryFavorites,
+  downloadTrackToLibrary,
+} from "../utils/api/endpoints/library.js";
+import {
+  canonicalLibraryId,
+  findCanonicalAlbumByName,
+  findCanonicalArtistByName,
+} from "../utils/libraryTrackNavigation.js";
 import {
   PlaylistLibraryItem,
   PlaylistDetailHero,
@@ -54,6 +72,7 @@ import { FlowEmptyState } from "./flows/flowComponents/FlowEmptyState.jsx";
 import { ConfirmModal } from "./flows/flowComponents/ConfirmModal.jsx";
 import { MoreMenu } from "./flows/flowComponents/MoreMenu.jsx";
 import { getApiErrorMessage } from "./onboardingUtils.jsx";
+import { queryClient, queryKeys } from "../queryClient.js";
 import {
   NEW_FLOW_TEMPLATE,
   buildFlowFromForm,
@@ -75,6 +94,7 @@ import {
   reserveUniqueFlowName,
   slugifyFilePart,
 } from "./flows/flowPageUtils";
+import Tooltip from "../components/Tooltip";
 
 const SYNC_INTERVAL_OPTIONS = [
   { value: 0, label: "None" },
@@ -85,6 +105,12 @@ const SYNC_INTERVAL_OPTIONS = [
 ];
 
 const FLOW_MOBILE_LAYOUT_QUERY = "(max-width: 767px)";
+
+function getImportedProviderLabel(provider) {
+  if (String(provider || "").startsWith("listenbrainz-")) return "ListenBrainz";
+  if (provider === "lastfm-station") return "Last.fm";
+  return "Spotify";
+}
 
 function useFlowMobileLayout() {
   const [isMobileLayout, setIsMobileLayout] = useState(() =>
@@ -140,8 +166,23 @@ function readLibrarySidebarCollapsed() {
   }
 }
 
-function FlowPage() {
-  useDocumentTitle("Playlists");
+const playlistTrackFavoriteId = (entry, track) => {
+  const kind = entry?.kind === "flow" ? "flow-song" : entry?.kind === "shared" ? "shared-song" : "";
+  if (!kind || !entry?.id || !track?.id) return "";
+  return `${kind}:${encodeURIComponent(`${entry.id}:${track.id}`)}`;
+};
+
+const normalizeFlowJobs = (jobs) =>
+  (Array.isArray(jobs) ? jobs : []).map((job) => ({
+    ...job,
+    albumName: job?.albumName || null,
+    reason: job?.reason || null,
+    streamUrl: job?.status === "done" && job?.id ? getFlowTrackStreamUrl(job.id) : null,
+  }));
+
+function FlowPage({ mode = "all" }) {
+  const fixedLibraryFilter = mode === "flows" ? "flows" : mode === "playlists" ? "playlists" : null;
+  useDocumentTitle(mode === "flows" ? "Flows" : "Playlists");
   const navigate = useNavigate();
   const location = useLocation();
   const {
@@ -157,7 +198,7 @@ function FlowPage() {
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [confirmDisable, setConfirmDisable] = useState(null);
   const [selectedId, setSelectedId] = useState(null);
-  const [libraryFilter, setLibraryFilter] = useState("all");
+  const [libraryFilter, setLibraryFilter] = useState(fixedLibraryFilter || "all");
   const [libraryCollapsed, setLibraryCollapsed] = useState(readLibrarySidebarCollapsed);
   const [detailTab, setDetailTab] = useState("tracks");
   const [mobileShowDetail, setMobileShowDetail] = useState(false);
@@ -180,27 +221,65 @@ function FlowPage() {
   const [applyingFlowNameId, setApplyingFlowNameId] = useState(null);
   const [applyingSharedPlaylistNameId, setApplyingSharedPlaylistNameId] = useState(null);
   const [reSearchingTrackIds, setReSearchingTrackIds] = useState({});
-  const [reSearchingMissingPlaylistId, setReSearchingMissingPlaylistId] = useState(null);
   const [searchingUpgradePlaylistId, setSearchingUpgradePlaylistId] = useState(null);
   const [syncingImportPlaylistId, setSyncingImportPlaylistId] = useState(null);
   const [updatingSyncIntervalPlaylistId, setUpdatingSyncIntervalPlaylistId] = useState(null);
+  const [updatingAvailabilityPlaylistId, setUpdatingAvailabilityPlaylistId] = useState(null);
+  const [updatingRecordHistoryId, setUpdatingRecordHistoryId] = useState(null);
   const [savingToPlaylistId, setSavingToPlaylistId] = useState(null);
   const [deletingTrackId, setDeletingTrackId] = useState(null);
   const [bulkActionLoading, setBulkActionLoading] = useState(false);
-  const [selectedTracks, setSelectedTracks] = useState([]);
-  const [selectedTracksLoading, setSelectedTracksLoading] = useState(false);
-  const [selectedTracksError, setSelectedTracksError] = useState("");
+  const [trackArtworkByAlbumMbid, setTrackArtworkByAlbumMbid] = useState({});
   const [importModalOpen, setImportModalOpen] = useState(false);
   const [isCreatePlaylistOpen, setIsCreatePlaylistOpen] = useState(false);
   const [creatingPlaylist, setCreatingPlaylist] = useState(false);
   const [createPlaylistError, setCreatePlaylistError] = useState("");
   const [playlistMenuSavingKey, setPlaylistMenuSavingKey] = useState("");
   const [playlistMenuError, setPlaylistMenuError] = useState("");
+  const [libraryTrackSavingKey, setLibraryTrackSavingKey] = useState("");
+  const [favoriteTrackSavingKey, setFavoriteTrackSavingKey] = useState("");
   const playlistsLoading = false;
   const { user } = useAuth();
   const { showSuccess, showError } = useToast();
+  const selectedTracksQuery = useQuery({
+    queryKey: queryKeys.playlistJobs(selectedId),
+    queryFn: ({ signal }) =>
+      getFlowJobs(selectedId, null, { signal }).then(normalizeFlowJobs),
+    enabled: Boolean(selectedId),
+    staleTime: 15_000,
+    refetchInterval: (query) => {
+      if (!sharedPlaylists.some((playlist) => playlist.id === selectedId && playlist.showTrackAvailability)) return false;
+      return query.state.data?.some((track) => ["pending", "downloading"].includes(track.status)) ? 4000 : 30000;
+    },
+  });
+  const selectedTracks = useMemo(
+    () => selectedTracksQuery.data || [],
+    [selectedTracksQuery.data],
+  );
+  const selectedTracksLoading = selectedTracksQuery.isPending;
+  const selectedTracksError =
+    selectedTracksQuery.error?.response?.data?.message ||
+    selectedTracksQuery.error?.message ||
+    "";
+  const favoriteQuery = useQuery({
+    queryKey: queryKeys.libraryFavorites,
+    queryFn: ({ signal }) => fetchLibraryFavorites({ signal }),
+    staleTime: 30_000,
+  });
+  const favoriteTrackIds = useMemo(
+    () => new Set(
+      (Array.isArray(favoriteQuery.data?.song) ? favoriteQuery.data.song : [])
+        .map((entry) => String(entry?.id || "").trim())
+        .filter(Boolean),
+    ),
+    [favoriteQuery.data],
+  );
   const disabledFlowSources = status?.capabilities?.unavailableSources || {};
   const canCreateGeneratedFlow = Object.keys(disabledFlowSources).length === 0;
+
+  useEffect(() => {
+    if (fixedLibraryFilter) setLibraryFilter(fixedLibraryFilter);
+  }, [fixedLibraryFilter]);
 
   useEffect(() => {
     if (!selectedId || !status?.flows?.length) return;
@@ -407,31 +486,20 @@ function FlowPage() {
   };
 
   const fetchFlowTracks = useCallback(
-    async (flowId, { showSpinner = true, signal } = {}) => {
-      if (!flowId) return;
-      if (showSpinner) {
-        setSelectedTracksLoading(true);
-      }
-      setSelectedTracksError("");
+    async (flowId, { signal } = {}) => {
+      if (!flowId) return [];
       try {
-        const jobs = await getFlowJobs(flowId, null, { signal });
-        if (signal?.aborted) return;
-        const normalized = (Array.isArray(jobs) ? jobs : []).map((job) => ({
-          ...job,
-          albumName: job?.albumName || null,
-          reason: job?.reason || null,
-          streamUrl: job?.status === "done" && job?.id ? getFlowTrackStreamUrl(job.id) : null,
-        }));
-        setSelectedTracks(normalized);
+        return await queryClient.fetchQuery({
+          queryKey: queryKeys.playlistJobs(flowId),
+          queryFn: ({ signal: querySignal }) =>
+            getFlowJobs(flowId, null, { signal: signal || querySignal }).then(normalizeFlowJobs),
+          staleTime: 0,
+        });
       } catch (err) {
-        if (signal?.aborted) return;
+        if (signal?.aborted) return [];
         const message = err.response?.data?.message || err.message || "Failed to load tracks";
-        setSelectedTracksError(message);
         showError(message);
-      } finally {
-        if (showSpinner && !signal?.aborted) {
-          setSelectedTracksLoading(false);
-        }
+        return [];
       }
     },
     [showError],
@@ -523,15 +591,16 @@ function FlowPage() {
     return [...shared, ...generated];
   }, [sharedPlaylists, effectiveFlowList]);
 
+  const activeLibraryFilter = fixedLibraryFilter || libraryFilter;
   const filteredCollection = useMemo(() => {
-    if (libraryFilter === "playlists") {
+    if (activeLibraryFilter === "playlists") {
       return collection.filter((entry) => entry.kind === "shared");
     }
-    if (libraryFilter === "flows") {
+    if (activeLibraryFilter === "flows") {
       return collection.filter((entry) => entry.kind === "flow");
     }
     return collection;
-  }, [collection, libraryFilter]);
+  }, [activeLibraryFilter, collection]);
 
   const selectedEntry = useMemo(
     () => collection.find((entry) => entry.id === selectedId) || null,
@@ -587,18 +656,40 @@ function FlowPage() {
   ]);
 
   useEffect(() => {
-    if (!selectedId) {
-      setSelectedTracks([]);
-      setSelectedTracksLoading(false);
-      setSelectedTracksError("");
-      return;
+    if (selectedEntry?.kind !== "shared") {
+      setTrackArtworkByAlbumMbid({});
+      return undefined;
     }
-    setSelectedTracks([]);
-    setSelectedTracksError("");
-    const controller = new AbortController();
-    fetchFlowTracks(selectedId, { signal: controller.signal });
-    return () => controller.abort();
-  }, [selectedId, fetchFlowTracks]);
+    const items = selectedTracks
+      .map((track) => ({
+        mbid: track?.albumMbid,
+        artistName: track?.artistName,
+        albumTitle: track?.albumName,
+      }))
+      .filter((item) => item.mbid);
+    if (!items.length) {
+      setTrackArtworkByAlbumMbid({});
+      return undefined;
+    }
+    let cancelled = false;
+    getReleaseGroupCoversBatch(items)
+      .then((covers) => {
+        if (cancelled) return;
+        setTrackArtworkByAlbumMbid(
+          Object.fromEntries(
+            Object.entries(covers || {})
+              .map(([mbid, cover]) => [mbid, cover?.image || ""])
+              .filter(([, image]) => image),
+          ),
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setTrackArtworkByAlbumMbid({});
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedEntry?.kind, selectedTracks]);
 
   const selectPlaylist = (entry) => {
     if (isMobileLayout && selectedId === entry.id && mobileShowDetail) {
@@ -956,16 +1047,74 @@ function FlowPage() {
     }
   };
 
-  const handleReSearchTrack = async (playlistId, track, isFlow = false) => {
+  const handleUpdateTrackAvailability = async (playlist, enabled) => {
+    if (updatingAvailabilityPlaylistId) return;
+    setUpdatingAvailabilityPlaylistId(playlist.id);
+    try {
+      const result = await setPlaylistTrackAvailability(playlist.id, enabled);
+      await queryClient.cancelQueries({ queryKey: queryKeys.playlistStatus });
+      queryClient.setQueryData(queryKeys.playlistStatus, (current) => current ? ({
+        ...current,
+        sharedPlaylists: current.sharedPlaylists.map((entry) => entry.id === playlist.id
+          ? { ...entry, showTrackAvailability: result.showTrackAvailability }
+          : entry),
+      }) : current);
+      if (enabled) {
+        void queryClient.invalidateQueries({ queryKey: queryKeys.playlistJobs(playlist.id) });
+      }
+    } catch (err) {
+      showError(getApiErrorMessage(err, "Failed to update track availability"));
+    } finally {
+      setUpdatingAvailabilityPlaylistId(null);
+    }
+  };
+
+  const handleUpdateRecordHistory = async (entry, enabled) => {
+    if (!entry?.id || updatingRecordHistoryId) return;
+    setUpdatingRecordHistoryId(entry.id);
+    try {
+      if (entry.kind === "flow") {
+        const currentFlow = effectiveFlowList.find((flow) => flow.id === entry.id);
+        await updateFlow(entry.id, { recordHistory: enabled });
+        setSimpleDrafts((prev) => ({
+          ...prev,
+          [entry.id]: {
+            ...(prev[entry.id] || (currentFlow ? flowToForm(currentFlow) : {})),
+            recordHistory: enabled,
+          },
+        }));
+      } else {
+        const result = await setPlaylistRecordHistory(entry.id, enabled);
+        queryClient.setQueryData(queryKeys.playlistStatus, (current) => current ? ({
+          ...current,
+          sharedPlaylists: current.sharedPlaylists.map((playlist) =>
+            playlist.id === entry.id
+              ? { ...playlist, recordHistory: result.recordHistory }
+              : playlist,
+          ),
+        }) : current);
+      }
+      showSuccess(enabled ? "Listening history enabled" : "Listening history disabled");
+      await fetchStatus();
+    } catch (err) {
+      showError(getApiErrorMessage(err, "Failed to update listening history setting"));
+    } finally {
+      setUpdatingRecordHistoryId(null);
+    }
+  };
+
+  const handleReSearchTrack = async (flowId, track, isSharedPlaylist = false) => {
     const jobId = track?.id;
-    if (!playlistId || !jobId || reSearchingTrackIds[jobId]) return;
+    if (!flowId || !jobId || reSearchingTrackIds[jobId]) return;
+    const searchAction = getTrackSearchAction(track, isSharedPlaylist);
+    if (!searchAction) return;
     setReSearchingTrackIds((prev) => ({
       ...prev,
       [jobId]: true,
     }));
-    if (track.status !== "done" && playlistId === selectedId) {
-      setSelectedTracks((prev) =>
-        prev.map((entry) =>
+    if (searchAction === "research" && flowId === selectedId) {
+      queryClient.setQueryData(queryKeys.playlistJobs(flowId), (prev) =>
+        (prev || []).map((entry) =>
           entry?.id === jobId
             ? {
                 ...entry,
@@ -978,22 +1127,19 @@ function FlowPage() {
       );
     }
     try {
-      if (track.status === "done") {
-        const result = await searchTrackUpgrade(playlistId, jobId);
+      if (searchAction === "upgrade") {
+        const result = await searchTrackUpgrade(flowId, jobId);
         showSuccess(
           result?.alreadyQueued
             ? `Upgrade search already queued for ${track.trackName}`
             : `Searching for an upgrade to ${track.trackName}`,
         );
-      } else if (isFlow) {
-        await reSearchFlowTrack(playlistId, jobId);
-        showSuccess(`Re-searching ${track.trackName}`);
       } else {
-        await reSearchSharedPlaylistTrack(playlistId, jobId);
+        await (isSharedPlaylist ? reSearchSharedPlaylistTrack : reSearchFlowTrack)(flowId, jobId);
         showSuccess(`Re-searching ${track.trackName}`);
       }
       await fetchStatus();
-      await fetchFlowTracks(playlistId, { showSpinner: false });
+      await fetchFlowTracks(flowId, { showSpinner: false });
     } catch (err) {
       const message =
         err.response?.data?.message ||
@@ -1001,7 +1147,7 @@ function FlowPage() {
         err.message ||
         "Failed to re-search track";
       showError(message);
-      await fetchFlowTracks(playlistId, { showSpinner: false });
+      await fetchFlowTracks(flowId, { showSpinner: false });
     } finally {
       setReSearchingTrackIds(({ [jobId]: _, ...prev }) => prev);
     }
@@ -1027,33 +1173,10 @@ function FlowPage() {
     }
   };
 
-  const handleReSearchMissingSharedPlaylistTracks = async (playlistId) => {
-    if (!playlistId || reSearchingMissingPlaylistId) return;
-    setReSearchingMissingPlaylistId(playlistId);
-    try {
-      const result = await reSearchMissingSharedPlaylistTracks(playlistId);
-      showSuccess(
-        result?.requeued > 0
-          ? `Re-searching ${result.requeued} track${result.requeued !== 1 ? "s" : ""}`
-          : "No failed tracks to re-search",
-      );
-      await fetchStatus();
-      await fetchFlowTracks(playlistId, { showSpinner: false });
-    } catch (err) {
-      const message =
-        err.response?.data?.message ||
-        err.response?.data?.error ||
-        err.message ||
-        "Failed to re-search missing tracks";
-      showError(message);
-    } finally {
-      setReSearchingMissingPlaylistId(null);
-    }
-  };
-
-  const handleSyncSpotifyPlaylist = async (playlist) => {
+  const handleSyncImportedPlaylist = async (playlist) => {
     if (!playlist?.id || syncingImportPlaylistId) return;
     setSyncingImportPlaylistId(playlist.id);
+    const providerLabel = getImportedProviderLabel(playlist.importSource?.provider);
     try {
       const result = await syncSharedPlaylistImport(playlist.id);
       if (result?.skipped) {
@@ -1062,8 +1185,8 @@ function FlowPage() {
         const queued = Number(result?.tracksQueued || 0);
         showSuccess(
           queued > 0
-            ? `Synced ${queued} new track${queued !== 1 ? "s" : ""} from Spotify`
-            : "Spotify playlist synced",
+            ? `Synced ${queued} new track${queued !== 1 ? "s" : ""} from ${providerLabel}`
+            : `${providerLabel} playlist synced`,
         );
       }
       await fetchStatus();
@@ -1075,7 +1198,7 @@ function FlowPage() {
     }
   };
 
-  const handleUpdateSpotifySyncInterval = async (playlist, syncIntervalHours) => {
+  const handleUpdateImportedSyncInterval = async (playlist, syncIntervalHours) => {
     if (!playlist?.id || updatingSyncIntervalPlaylistId) return;
     const current = playlist.importSource?.syncIntervalHours ?? 0;
     if (syncIntervalHours === current) return;
@@ -1096,11 +1219,173 @@ function FlowPage() {
     }
   };
 
-  const handleNavigateArtist = (track) => {
+  const handleUpdateImportedRetention = async (playlist, keepRemovedTracks) => {
+    if (!playlist?.id || updatingSyncIntervalPlaylistId) return;
+    const current = playlist.importSource?.keepRemovedTracks !== false;
+    if (keepRemovedTracks === current) return;
+    setUpdatingSyncIntervalPlaylistId(playlist.id);
+    try {
+      await updateSharedPlaylist(playlist.id, {
+        importSource: { keepRemovedTracks },
+      });
+      showSuccess(
+        keepRemovedTracks
+          ? "Removed tracks will stay in the library"
+          : "Removed tracks will be deleted when unshared",
+      );
+      await fetchStatus();
+    } catch (err) {
+      showError(getApiErrorMessage(err, "Failed to update removed-track setting"));
+    } finally {
+      setUpdatingSyncIntervalPlaylistId(null);
+    }
+  };
+
+  const handleNavigateArtist = async (track) => {
     if (!track?.artistMbid) return;
-    navigate(`/artist/${track.artistMbid}`, {
-      state: { artistName: track.artistName },
-    });
+    if (selectedIsFlow) {
+      navigate(`/artist/${track.artistMbid}`, {
+        state: { artistName: track.artistName },
+      });
+      return;
+    }
+    let canonicalId = null;
+    try {
+      const lookup = await lookupArtistInLibrary(track.artistMbid);
+      canonicalId = lookup?.artist?.canonicalId || null;
+    } catch {}
+    if (!canonicalId && track.artistName) {
+      try {
+        const page = await getCanonicalLibraryPage({
+          kind: "artists",
+          page: 1,
+          pageSize: 100,
+          query: track.artistName,
+          // Resolve for navigation even if nothing is available yet.
+          availableOnly: false,
+        });
+        canonicalId = canonicalLibraryId(
+          findCanonicalArtistByName(page?.items, track.artistName),
+        );
+      } catch {}
+    }
+    if (canonicalId) navigate(`/library/artist/${encodeURIComponent(canonicalId)}`);
+  };
+
+  const handleNavigateAlbum = async (track) => {
+    if (!track?.albumMbid) return;
+    if (selectedIsFlow && track.artistMbid) {
+      navigate(`/artist/${track.artistMbid}/release/${track.albumMbid}`, {
+        state: {
+          artistName: track.artistName,
+          focusReleaseGroupMbid: track.albumMbid,
+          focusReleaseGroup: {
+            id: track.albumMbid,
+            title: track.albumName || "",
+          },
+        },
+      });
+      return;
+    }
+    let canonicalId = null;
+    try {
+      const lookup = await lookupAlbumsInLibraryBatch([track.albumMbid]);
+      canonicalId = lookup?.[track.albumMbid]?.canonicalAlbumId || null;
+    } catch {}
+    if (!canonicalId && track.albumName) {
+      try {
+        const page = await getCanonicalLibraryPage({
+          kind: "albums",
+          page: 1,
+          pageSize: 100,
+          query: track.albumName,
+          // Resolve for navigation even if nothing is available yet.
+          availableOnly: false,
+        });
+        canonicalId = canonicalLibraryId(
+          findCanonicalAlbumByName(page?.items, track.albumName, track.artistName),
+        );
+      } catch {}
+    }
+    if (canonicalId) navigate(`/library/album/${encodeURIComponent(canonicalId)}`);
+  };
+
+  const handleAddTrackToLibrary = async (track) => {
+    const payload = {
+      artistName: String(track?.artistName || "").trim(),
+      trackName: String(track?.trackName || "").trim(),
+      albumName: String(track?.albumName || "").trim() || null,
+      artistMbid: String(track?.artistMbid || "").trim() || null,
+      albumMbid: String(track?.albumMbid || "").trim() || null,
+      trackMbid: String(track?.trackMbid || "").trim() || null,
+      releaseYear: track?.releaseYear || null,
+      durationMs: track?.durationMs || null,
+      trackNumber: track?.trackNumber,
+      albumTrackCount: track?.albumTrackCount,
+      albumTrackTitles: track?.albumTrackTitles,
+    };
+    if (!payload.artistName || !payload.trackName || libraryTrackSavingKey) {
+      if (!payload.artistName || !payload.trackName) showError("Track details are incomplete");
+      return;
+    }
+    const savingKey = String(track?.id || `${payload.artistName}:${payload.trackName}`);
+    setLibraryTrackSavingKey(savingKey);
+    try {
+      const result = await downloadTrackToLibrary(payload);
+      showSuccess(
+        result?.alreadyOwned
+          ? `${payload.trackName} is already in your library`
+          : result?.queued
+            ? `Queued ${payload.trackName} for your library`
+            : `Added ${payload.trackName} to your library`,
+      );
+    } catch (err) {
+      showError(
+        err.response?.data?.message ||
+          err.response?.data?.error ||
+          err.message ||
+          "Failed to add track to library",
+      );
+    } finally {
+      setLibraryTrackSavingKey("");
+    }
+  };
+
+  const handleToggleTrackFavorite = async (track) => {
+    const id = playlistTrackFavoriteId(selectedEntry, track);
+    if (!id || favoriteTrackSavingKey) return;
+    const nextStarred = !favoriteTrackIds.has(id);
+    const favoriteQueryKey = queryKeys.libraryFavorites;
+    setFavoriteTrackSavingKey(id);
+    let previous;
+    let optimistic;
+    try {
+      await queryClient.cancelQueries({ queryKey: favoriteQueryKey });
+      previous = queryClient.getQueryData(favoriteQueryKey);
+      optimistic = queryClient.setQueryData(favoriteQueryKey, (current = {}) => {
+        const songs = Array.isArray(current.song) ? current.song : [];
+        const withoutTrack = songs.filter((entry) => String(entry?.id || "") !== id);
+        return {
+          ...current,
+          song: nextStarred ? [...withoutTrack, { id }] : withoutTrack,
+        };
+      });
+      await updateLibraryFavorites([id], nextStarred);
+      showSuccess(nextStarred ? "Added to favorites" : "Removed from favorites");
+    } catch (err) {
+      if (optimistic && queryClient.getQueryData(favoriteQueryKey) === optimistic) {
+        queryClient.setQueryData(favoriteQueryKey, previous);
+      }
+      showError(
+        err.response?.data?.message ||
+          err.response?.data?.error ||
+          err.message ||
+          "Failed to update favorites",
+      );
+    } finally {
+      void queryClient.invalidateQueries({ queryKey: favoriteQueryKey }).catch(() => {});
+      setFavoriteTrackSavingKey("");
+    }
   };
 
   const handleBulkDelete = async (tracks) => {
@@ -1122,40 +1407,6 @@ function FlowPage() {
     }
     if (failed.length > 0) {
       showError(`Failed to remove: ${failed.join(", ")}`);
-    }
-    setBulkActionLoading(false);
-    await fetchStatus();
-    await fetchFlowTracks(selectedPlaylist.id, { showSpinner: false });
-  };
-
-  const handleBulkReSearch = async (tracks) => {
-    if (!selectedPlaylist) return;
-    setBulkActionLoading(true);
-    let requeued = 0;
-    for (const track of tracks) {
-      if (!track?.id) continue;
-      const canReSearch = track.status === "done" || track.status === "failed";
-      if (!canReSearch || reSearchingTrackIds[track.id]) continue;
-      setReSearchingTrackIds((prev) => ({ ...prev, [track.id]: true }));
-      setSelectedTracks((prev) =>
-        prev.map((entry) =>
-          entry?.id === track.id
-            ? { ...entry, status: "pending", error: null, streamUrl: null }
-            : entry,
-        ),
-      );
-      try {
-        if (track.status === "done") {
-          await searchTrackUpgrade(selectedPlaylist.id, track.id);
-        } else {
-          await reSearchSharedPlaylistTrack(selectedPlaylist.id, track.id);
-        }
-        requeued++;
-      } catch {
-      }
-    }
-    if (requeued > 0) {
-      showSuccess(`Re-searching ${requeued} track${requeued !== 1 ? "s" : ""}`);
     }
     setBulkActionLoading(false);
     await fetchStatus();
@@ -1251,7 +1502,7 @@ function FlowPage() {
   if (loading && !status) {
     return (
       <div className="flow-page__loading">
-        <Loader2 className="artist-spinner artist-spinner--large" />
+        <DotLoader size="2xl" label={null} />
       </div>
     );
   }
@@ -1266,11 +1517,15 @@ function FlowPage() {
       ? sharedPlaylists.find((playlist) => playlist.id === selectedEntry.id)
       : null;
   const selectedStats = selectedId ? getPlaylistStats(selectedId) : null;
+  const showTrackAvailability = selectedPlaylist?.showTrackAvailability === true;
   const playbackSource = selectedEntry
     ? {
         type: selectedIsFlow ? "flow" : "playlist",
         id: selectedEntry.id,
         label: selectedFlow?.name || selectedPlaylist?.name || selectedEntry.name || "Playlist",
+        recordHistory: selectedIsFlow
+          ? selectedFlow?.recordHistory !== false
+          : selectedPlaylist?.recordHistory !== false,
       }
     : null;
   const flowEnabled = selectedFlow?.enabled === true;
@@ -1285,7 +1540,11 @@ function FlowPage() {
     }
     return getSharedPlaylistTrackCount(selectedPlaylist, selectedStats, selectedTracks.length);
   })();
-  const selectedEntryTrackLabel = formatTrackCountLabel(selectedEntryTotalTracks, selectedStats);
+  const selectedEntryTrackLabel = selectedIsFlow
+    ? formatTrackCountLabel(selectedEntryTotalTracks, selectedStats)
+    : showTrackAvailability && !selectedTracksLoading && !selectedTracksError
+      ? `${countAvailableTracks(selectedTracks)}/${selectedEntryTotalTracks} available`
+      : `${selectedEntryTotalTracks} ${selectedEntryTotalTracks === 1 ? "track" : "tracks"}`;
   const flowLastRunShort = selectedFlow ? formatFlowLastRunShort(selectedFlow.lastRunAt) : null;
   const flowNextRunShort =
     selectedFlow && flowEnabled && getPlaylistState(selectedFlow.id) !== "running"
@@ -1338,12 +1597,11 @@ function FlowPage() {
     return count;
   };
   const getEntryActivityMessage = (entry) => {
-    if (!entry?.id) return null;
-    const isFlow = entry.kind === "flow";
+    if (!entry?.id || entry.kind !== "flow") return null;
     const activity = getPlaylistRunActivity({
       playlistId: entry.id,
-      kind: isFlow ? "flow" : "playlist",
-      enabled: isFlow ? entry.enabled === true : true,
+      kind: "flow",
+      enabled: entry.enabled === true,
       status,
       stats: getPlaylistStats(entry.id),
       rerunning: rerunningId === entry.id,
@@ -1373,6 +1631,20 @@ function FlowPage() {
     <MoreMenu activeButtonClass="btn-neutral-active">
       {selectedIsFlow && selectedFlow ? (
         <>
+          <div
+            className="flow-page__menu-sync-toggle-row"
+            onClick={(event) => event.stopPropagation()}
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <span className="flow-page__menu-sync-label">Record listening history</span>
+            <PillToggle
+              checked={selectedFlow.recordHistory !== false}
+              onChange={(event) => handleUpdateRecordHistory(selectedFlow, event.target.checked)}
+              disabled={updatingRecordHistoryId === selectedFlow.id}
+              aria-label={`Record listening history ${selectedFlow.recordHistory !== false ? "on" : "off"}`}
+            />
+          </div>
+          <div className="flow-page__menu-divider" />
           <button
             type="button"
             className="artist-menu-item"
@@ -1381,7 +1653,7 @@ function FlowPage() {
           >
             <span className="artist-menu-item__main">
               {searchingUpgradePlaylistId === selectedFlow.id ? (
-                <Loader2 className="artist-icon-sm animate-spin" />
+                <DotLoader size="sm" label={null} />
               ) : (
                 <Search className="artist-icon-sm" />
               )}
@@ -1396,7 +1668,7 @@ function FlowPage() {
           >
             <span className="artist-menu-item__main">
               {rerunningId === selectedFlow.id ? (
-                <Loader2 className="artist-icon-sm animate-spin" />
+                <DotLoader size="sm" label={null} />
               ) : (
                 <Play className="artist-icon-sm" />
               )}
@@ -1456,17 +1728,22 @@ function FlowPage() {
         </>
       ) : selectedPlaylist ? (
         <>
-          {selectedPlaylist?.importSource?.provider === "spotify-playlist" ? (
+          {[
+            "spotify-playlist",
+            "listenbrainz-playlist",
+            "listenbrainz-createdfor",
+            "lastfm-station",
+          ].includes(selectedPlaylist?.importSource?.provider) ? (
             <>
               <button
                 type="button"
                 className="artist-menu-item"
-                onClick={() => handleSyncSpotifyPlaylist(selectedPlaylist)}
+                onClick={() => handleSyncImportedPlaylist(selectedPlaylist)}
                 disabled={syncingImportPlaylistId === selectedPlaylist.id}
               >
                 <span className="artist-menu-item__main">
                   {syncingImportPlaylistId === selectedPlaylist.id ? (
-                    <Loader2 className="artist-icon-sm animate-spin" />
+                    <DotLoader size="sm" label={null} />
                   ) : (
                     <RefreshCw className="artist-icon-sm" />
                   )}
@@ -1489,7 +1766,7 @@ function FlowPage() {
                   className="flow-page__menu-sync-select"
                   value={selectedPlaylist.importSource?.syncIntervalHours ?? 0}
                   onChange={(event) =>
-                    handleUpdateSpotifySyncInterval(
+                    handleUpdateImportedSyncInterval(
                       selectedPlaylist,
                       Number(event.target.value),
                     )
@@ -1503,41 +1780,52 @@ function FlowPage() {
                   ))}
                 </select>
               </div>
-              <div className="flow-page__menu-divider" />
+              <div
+                className="flow-page__menu-sync-toggle-row"
+                onClick={(event) => event.stopPropagation()}
+                onMouseDown={(event) => event.stopPropagation()}
+              >
+                <span className="flow-page__menu-sync-label">
+                  Keep removed tracks in library
+                </span>
+                <PillToggle
+                  checked={selectedPlaylist.importSource?.keepRemovedTracks !== false}
+                  onChange={(event) =>
+                    handleUpdateImportedRetention(selectedPlaylist, event.target.checked)
+                  }
+                  disabled={updatingSyncIntervalPlaylistId === selectedPlaylist.id}
+                  aria-label={`Keep removed ${getImportedProviderLabel(selectedPlaylist.importSource?.provider)} tracks in library`}
+                />
+              </div>
             </>
           ) : null}
-          <button
-            type="button"
-            className="artist-menu-item"
-            onClick={() =>
-              handleReSearchMissingSharedPlaylistTracks(selectedPlaylist.id)
-            }
-            disabled={reSearchingMissingPlaylistId === selectedPlaylist.id}
+          <div
+            className="flow-page__menu-sync-toggle-row"
+            onClick={(event) => event.stopPropagation()}
+            onMouseDown={(event) => event.stopPropagation()}
           >
-            <span className="artist-menu-item__main">
-              {reSearchingMissingPlaylistId === selectedPlaylist.id ? (
-                <Loader2 className="artist-icon-sm animate-spin" />
-              ) : (
-                <Search className="artist-icon-sm" />
-              )}
-              Re-search missing
-            </span>
-          </button>
-          <button
-            type="button"
-            className="artist-menu-item"
-            onClick={() => handleSearchPlaylistUpgrades(selectedPlaylist.id)}
-            disabled={searchingUpgradePlaylistId === selectedPlaylist.id}
+            <span className="flow-page__menu-sync-label">Record listening history</span>
+            <PillToggle
+              checked={selectedPlaylist.recordHistory !== false}
+              onChange={(event) => handleUpdateRecordHistory(selectedPlaylist, event.target.checked)}
+              disabled={updatingRecordHistoryId === selectedPlaylist.id}
+              aria-label={`Record listening history ${selectedPlaylist.recordHistory !== false ? "on" : "off"}`}
+            />
+          </div>
+          <div
+            className="flow-page__menu-sync-toggle-row"
+            onClick={(event) => event.stopPropagation()}
+            onMouseDown={(event) => event.stopPropagation()}
           >
-            <span className="artist-menu-item__main">
-              {searchingUpgradePlaylistId === selectedPlaylist.id ? (
-                <Loader2 className="artist-icon-sm animate-spin" />
-              ) : (
-                <Search className="artist-icon-sm" />
-              )}
-              Search for upgrades
-            </span>
-          </button>
+            <span className="flow-page__menu-sync-label">Show track availability</span>
+            <PillToggle
+              checked={showTrackAvailability}
+              onChange={(event) => handleUpdateTrackAvailability(selectedPlaylist, event.target.checked)}
+              disabled={updatingAvailabilityPlaylistId !== null}
+              aria-label="Show track availability"
+            />
+          </div>
+          <div className="flow-page__menu-divider" />
           <button
             type="button"
             className="artist-menu-item"
@@ -1583,11 +1871,10 @@ function FlowPage() {
                   : "Enable this flow to generate tracks."
                 : "No tracks in this playlist yet."
             }
-            useTrackContextMenu={!selectedIsFlow}
+            useTrackContextMenu
             allowBulkEdit={!selectedIsFlow}
             bulkActionLoading={bulkActionLoading}
             onBulkDelete={selectedIsFlow ? undefined : handleBulkDelete}
-            onBulkReSearch={selectedIsFlow ? undefined : handleBulkReSearch}
             onBulkAddToPlaylist={selectedIsFlow ? undefined : handleBulkAddToPlaylist}
             onBulkMoveToPlaylist={selectedIsFlow ? undefined : handleBulkMoveToPlaylist}
             playlists={sharedPlaylists}
@@ -1601,9 +1888,9 @@ function FlowPage() {
             deletingTrackId={selectedIsFlow ? undefined : deletingTrackId}
             onReSearchTrack={
               selectedIsFlow
-                ? (track) => handleReSearchTrack(selectedFlow.id, track, true)
-                : selectedPlaylist
-                  ? (track) => handleReSearchTrack(selectedPlaylist.id, track)
+                ? (track) => handleReSearchTrack(selectedFlow.id, track)
+                : showTrackAvailability
+                  ? (track) => handleReSearchTrack(selectedPlaylist.id, track, true)
                   : undefined
             }
             onDeleteTrack={
@@ -1617,7 +1904,21 @@ function FlowPage() {
                 ? undefined
                 : (track, target) => handleMoveTrackToPlaylist(track, target, selectedPlaylist.id)
             }
+            onAddTrackToLibrary={handleAddTrackToLibrary}
+            libraryTrackSavingKey={libraryTrackSavingKey}
+            getTrackFavoriteId={(track) => playlistTrackFavoriteId(selectedEntry, track)}
+            favoriteTrackIds={favoriteTrackIds}
+            favoriteTrackSavingKey={favoriteTrackSavingKey}
+            onToggleFavorite={handleToggleTrackFavorite}
             onNavigateArtist={handleNavigateArtist}
+            onNavigateAlbum={handleNavigateAlbum}
+            trackTitleLabel={selectedIsFlow ? "Song" : "Title"}
+            showTrackArtwork={!selectedIsFlow}
+            artworkByAlbumMbid={trackArtworkByAlbumMbid}
+            showDuration={!selectedIsFlow}
+            hideStatusColumn={!selectedIsFlow}
+            showTrackAvailability={showTrackAvailability}
+            hideQualityColumn
           />
         ) : null}
         {detailTab === "recipe" && selectedIsFlow && simpleDraft ? (
@@ -1709,7 +2010,7 @@ function FlowPage() {
                   onClick={() => handleApplySimple(selectedFlow)}
                 >
                   {applyingFlowId === selectedFlow.id ? (
-                    <Loader2 className="artist-icon-sm animate-spin" />
+                    <DotLoader size="sm" label={null} />
                   ) : null}
                   Save recipe
                 </button>
@@ -1746,7 +2047,7 @@ function FlowPage() {
   ) : null;
 
   return (
-    <div className="flow-page">
+    <div className={`flow-page${mode === "playlists" || mode === "flows" ? " flow-page--library" : ""}`}>
       <div
         className={`flow-page__shell${!isMobileLayout && libraryCollapsed ? " flow-page__shell--library-collapsed" : ""}`}
       >
@@ -1754,29 +2055,30 @@ function FlowPage() {
           className={`flow-page__library${!isMobileLayout && libraryCollapsed ? " flow-page__library--collapsed" : ""}`}
         >
           <div className="flow-page__library-head">
-            <button
-              type="button"
-              className="flow-page__library-collapse"
-              onClick={() => {
-                setLibraryCollapsed((prev) => {
-                  const next = !prev;
-                  try {
-                    globalThis.localStorage?.setItem(
-                      LIBRARY_SIDEBAR_COLLAPSED_KEY,
-                      next ? "1" : "0",
-                    );
-                  } catch {}
-                  return next;
-                });
-              }}
-              aria-label={
-                libraryCollapsed ? "Expand playlist sidebar" : "Collapse playlist sidebar"
-              }
-              title={libraryCollapsed ? "Expand playlist sidebar" : "Collapse playlist sidebar"}
-            >
-              <LibrarySidebarToggleIcon collapsed={libraryCollapsed} />
-            </button>
-            <h1 className="flow-page__library-title">Playlists</h1>
+            <Tooltip content={libraryCollapsed ? "Expand playlist sidebar" : "Collapse playlist sidebar"}>
+              <button
+                type="button"
+                className="flow-page__library-collapse"
+                onClick={() => {
+                  setLibraryCollapsed((prev) => {
+                    const next = !prev;
+                    try {
+                      globalThis.localStorage?.setItem(
+                        LIBRARY_SIDEBAR_COLLAPSED_KEY,
+                        next ? "1" : "0",
+                      );
+                    } catch {}
+                    return next;
+                  });
+                }}
+                aria-label={
+                  libraryCollapsed ? "Expand playlist sidebar" : "Collapse playlist sidebar"
+                }
+              >
+                <LibrarySidebarToggleIcon collapsed={libraryCollapsed} />
+              </button>
+            </Tooltip>
+            <h1 className="flow-page__library-title">{mode === "flows" ? "Flows" : "Playlists"}</h1>
             <FlowLibraryCreateMenu
               onImport={() => setImportModalOpen(true)}
               onNewPlaylist={handleOpenCreatePlaylist}
@@ -1784,38 +2086,43 @@ function FlowPage() {
               creatingPlaylist={creatingPlaylist}
               creatingFlow={creating}
               canCreateFlow={canCreateGeneratedFlow}
+              showPlaylists={mode !== "flows"}
+              showFlows={mode !== "playlists"}
+              showImport={mode !== "flows"}
               compact={libraryCollapsed}
             />
           </div>
-          <div
-            className="artist-segmented flow-page__library-filters"
-            role="group"
-            aria-label="Library filter"
-          >
-            {[
-              { id: "all", label: "All" },
-              { id: "playlists", label: "Playlists" },
-              { id: "flows", label: "Flows" },
-            ].map((filter) => {
-              const isActive = libraryFilter === filter.id;
-              return (
-                <button
-                  key={filter.id}
-                  type="button"
-                  className={`artist-segmented-button flow-page__library-filter${isActive ? " is-active" : ""}`}
-                  aria-pressed={isActive}
-                  onClick={() => setLibraryFilter(filter.id)}
-                >
-                  {filter.label}
-                </button>
-              );
-            })}
-          </div>
+          {!fixedLibraryFilter ? (
+            <div
+              className="artist-segmented flow-page__library-filters"
+              role="group"
+              aria-label="Library filter"
+            >
+              {[
+                { id: "all", label: "All" },
+                { id: "playlists", label: "Playlists" },
+                { id: "flows", label: "Flows" },
+              ].map((filter) => {
+                const isActive = libraryFilter === filter.id;
+                return (
+                  <button
+                    key={filter.id}
+                    type="button"
+                    className={`artist-segmented-button flow-page__library-filter${isActive ? " is-active" : ""}`}
+                    aria-pressed={isActive}
+                    onClick={() => setLibraryFilter(filter.id)}
+                  >
+                    {filter.label}
+                  </button>
+                );
+              })}
+            </div>
+          ) : null}
           <div className="flow-page__library-list">
             {filteredCollection.length === 0 ? (
               <FlowEmptyState
                 canCreate={canCreateGeneratedFlow}
-                libraryFilter={libraryFilter}
+                libraryFilter={activeLibraryFilter}
                 variant={isMobileLayout ? "full" : "compact"}
                 onImport={() => setImportModalOpen(true)}
                 onNewPlaylist={handleOpenCreatePlaylist}
@@ -1883,7 +2190,7 @@ function FlowPage() {
               filteredCollection.length === 0 ? (
                 <FlowEmptyState
                   canCreate={canCreateGeneratedFlow}
-                  libraryFilter={libraryFilter}
+                  libraryFilter={activeLibraryFilter}
                   variant="full"
                   onImport={() => setImportModalOpen(true)}
                   onNewPlaylist={handleOpenCreatePlaylist}

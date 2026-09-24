@@ -3,6 +3,7 @@ import { downloadTracker } from "../../../services/weeklyFlow/weeklyFlowDownload
 import { weeklyFlowWorker } from "../../../services/weeklyFlow/weeklyFlowWorker.js";
 import {
   dedupeSharedTracks,
+  flowPlaylistConfig,
 } from "../../../services/weeklyFlow/weeklyFlowPlaylistConfig.js";
 import { weeklyFlowOperationQueue } from "../../../services/weeklyFlow/weeklyFlowOperationQueue.js";
 import {
@@ -142,6 +143,34 @@ export function registerSharedPlaylists(router) {
     }
   });
 
+  router.put("/shared-playlists/:playlistId/track-availability", (req, res) => {
+    const { playlistId } = req.params;
+    if (!getAccessibleSharedPlaylist(req.user, playlistId)) {
+      return res.status(404).json({ error: "Shared playlist not found" });
+    }
+    if (typeof req.body?.enabled !== "boolean") {
+      return res.status(400).json({ error: "enabled must be a boolean" });
+    }
+    const playlist = flowPlaylistConfig.updateSharedPlaylist(playlistId, {
+      showTrackAvailability: req.body.enabled,
+    });
+    return res.json({ success: true, showTrackAvailability: playlist.showTrackAvailability });
+  });
+
+  router.put("/shared-playlists/:playlistId/record-history", (req, res) => {
+    const { playlistId } = req.params;
+    if (!getAccessibleSharedPlaylist(req.user, playlistId)) {
+      return res.status(404).json({ error: "Shared playlist not found" });
+    }
+    if (typeof req.body?.enabled !== "boolean") {
+      return res.status(400).json({ error: "enabled must be a boolean" });
+    }
+    const playlist = flowPlaylistConfig.updateSharedPlaylist(playlistId, {
+      recordHistory: req.body.enabled,
+    });
+    return res.json({ success: true, recordHistory: playlist.recordHistory });
+  });
+
   router.put("/shared-playlists/:playlistId", async (req, res) => {
     try {
       const { playlistId } = req.params;
@@ -238,7 +267,10 @@ export function registerSharedPlaylists(router) {
           return res.status(404).json({ error: "Shared playlist not found" });
         }
         const job = downloadTracker.getJob(jobId);
-        if (!job || job.playlistType !== playlistId) {
+        const playlistReferencesJob = playlist.tracks?.some(
+          (track) => String(track?.canonicalJobId || "") === String(jobId || ""),
+        );
+        if (!job || (job.playlistType !== playlistId && !playlistReferencesJob)) {
           return res.status(404).json({ error: "Track not found" });
         }
         const result = await weeklyFlowOperationQueue.enqueuePayload({

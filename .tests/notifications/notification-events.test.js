@@ -15,8 +15,14 @@ const [isolatedState, { db }, { dbOps }, notifications] = await setupIsolatedBac
   "backend/services/notificationService.js",
 );
 
-const { interpolateBody, deliverQueuedNotification, notifyRequestMade, notifyRequestAvailable, notifyWeeklyFlowDone } =
-  notifications;
+const {
+  interpolateBody,
+  deliverQueuedNotification,
+  sendWebhookTest,
+  notifyRequestMade,
+  notifyRequestAvailable,
+  notifyWeeklyFlowDone,
+} = notifications;
 
 async function withCaptureServer(handler) {
   const requests = [];
@@ -32,6 +38,7 @@ async function withCaptureServer(handler) {
       requests.push({
         method: req.method,
         url: req.url,
+        headers: req.headers,
         body,
       });
       res.writeHead(200, { "Content-Type": "application/json" });
@@ -155,6 +162,46 @@ test("deliverQueuedNotification interpolates request webhook bodies", async () =
       by: "alice",
       event: "notifyRequestAvailable",
     });
+  });
+});
+
+test("sendWebhookTest sends a GET without requiring a notification event", async () => {
+  await withCaptureServer(async ({ baseUrl, waitFor }) => {
+    await sendWebhookTest({
+      url: `${baseUrl}/hook`,
+      body: "",
+      headers: [{ key: "X-Webhook-Test", value: "get" }],
+    });
+
+    const requests = await waitFor(1);
+    assert.equal(requests[0].method, "GET");
+    assert.equal(requests[0].url, "/hook");
+    assert.equal(requests[0].body, null);
+    assert.equal(requests[0].headers["x-webhook-test"], "get");
+  });
+});
+
+test("sendWebhookTest sends a POST with fixed placeholder values and headers", async () => {
+  await withCaptureServer(async ({ baseUrl, waitFor }) => {
+    await sendWebhookTest({
+      url: `${baseUrl}/hook`,
+      body: '{"event":"$event","flow":"$flowName","path":"$flowPath","album":"$albumName","artist":"$artistName","user":"$username","id":"$userId"}',
+      headers: [{ key: "X-Webhook-Test", value: "post" }],
+    });
+
+    const requests = await waitFor(1);
+    assert.equal(requests[0].method, "POST");
+    assert.equal(requests[0].url, "/hook");
+    assert.deepEqual(requests[0].body, {
+      event: "webhookTest",
+      flow: "Aurral webhook test",
+      path: "/aurral/test-webhook",
+      album: "Test album",
+      artist: "Test artist",
+      user: "webhook-test-user",
+      id: "webhook-test-user",
+    });
+    assert.equal(requests[0].headers["x-webhook-test"], "post");
   });
 });
 
@@ -312,12 +359,14 @@ test("failed notification delivery is logged without an unhandled rejection", as
 
     await notifyRequestMade({ albumName: "Blue Train", artistName: "John Coltrane" });
     const failedLog = await waitFor(() =>
-      errors.find((args) => String(args[0]).includes("Notification delivery failed")),
+      errors.find((args) =>
+        args.map(String).join(" ").includes("Notification delivery failed"),
+      ),
     );
-    assert.deepEqual(failedLog[1], {
+    assert.deepEqual(failedLog[failedLog.length - 1], {
       kind: "webhooks",
       event: "notifyRequestMade",
-      receiver: `http://127.0.0.1:${port}/hook`,
+      receiver: "[redacted URL]",
       status: 500,
       message: "Request failed with status code 500",
     });
@@ -326,14 +375,17 @@ test("failed notification delivery is logged without an unhandled rejection", as
     await new Promise((resolve) => server.close(resolve));
     await notifyRequestAvailable({ albumName: "Blue Train", artistName: "John Coltrane" });
     const failedLogs = await waitFor(() => {
-      const logs = errors.filter((args) => String(args[0]).includes("Notification delivery failed"));
+      const logs = errors.filter((args) =>
+        args.map(String).join(" ").includes("Notification delivery failed"),
+      );
       return logs.length >= 2 ? logs : null;
     });
+    const secondLog = failedLogs[1][failedLogs[1].length - 1];
     assert.deepEqual(
       {
-        kind: failedLogs[1][1].kind,
-        event: failedLogs[1][1].event,
-        status: failedLogs[1][1].status,
+        kind: secondLog.kind,
+        event: secondLog.event,
+        status: secondLog.status,
       },
       { kind: "webhooks", event: "notifyRequestAvailable", status: null },
     );
@@ -370,7 +422,7 @@ test("notifyWeeklyFlowDone uses display name and track library path placeholders
     });
 
     const playlistId = "c0c01bc3-72ca-4110-8ab6-681f132a6e63";
-    const flowPath = `/data/downloads/aurral-weekly-flow/${playlistId}`;
+  const flowPath = `/data/downloads/aurral/_flows/${playlistId}`;
     await notifyWeeklyFlowDone(
       playlistId,
       { completed: 3, failed: 1 },

@@ -1,12 +1,14 @@
 import { useEffect, useMemo } from "react";
 import { useDiscoverNavigation } from "../../../hooks/useDiscoverNavigation";
-import { ArrowRight, Loader, Music, Star } from "lucide-react";
+import { ArrowRight, Music, Star } from "lucide-react";
+import { DotLoader } from "../../../components/DotLoader";
 import SearchLibraryCheck from "../../../components/SearchLibraryCheck";
 import AddActionButton from "../../../components/AddActionButton";
 import { navigateToReleaseGroup } from "../../../utils/searchNavigation";
 import { getReleaseGroupCoverUrl, getReleaseMetric, getReleaseYear } from "../utils";
 import { getAlbumAddButtonLabel } from "../../../utils/albumAddAction";
 import { useResponsiveReleaseLimit } from "../hooks/useResponsiveReleaseLimit";
+import Tooltip from "../../../components/Tooltip";
 
 const sortLatest = (items) =>
   [...items].sort((a, b) =>
@@ -60,7 +62,7 @@ export function ArtistDetailsAppearsOn({
         <div className="artist-min-0">
           <div className="artist-controls-row">
             <h2 className="artist-section-title">Appears On</h2>
-            {loadingAppearsOn && <Loader className="artist-icon-sm animate-spin" />}
+            {loadingAppearsOn && <DotLoader size="sm" label={null} />}
           </div>
         </div>
         {onViewAll ? (
@@ -97,10 +99,12 @@ export function ArtistDetailsAppearsOn({
                 )}
                 <div className="artist-release-card__action">
                   {status?.status === "available" || status?.status === "added" ? (
-                    <span className="artist-release-card__status" title="Complete">
-                      <SearchLibraryCheck size="overlay" />
-                      <span className="sr-only">Complete</span>
-                    </span>
+                    <Tooltip content="Complete">
+                      <span className="artist-release-card__status" >
+                        <SearchLibraryCheck size="overlay" />
+                        <span className="sr-only">Complete</span>
+                      </span>
+                    </Tooltip>
                   ) : canAddAlbum ? (
                     <div onClick={(event) => event.stopPropagation()}>
                       <AddActionButton

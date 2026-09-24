@@ -1,10 +1,10 @@
-import { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { getRequests, triggerAlbumSearch } from "../utils/api/endpoints/library.js";
 import { approveBlockedJob, denyBlockedJob, getStagingStreamUrl } from "../utils/api/endpoints/playlists";
 import { useAudioQueue } from "../contexts/audioQueueContext";
 import { useDocumentTitle } from "../hooks/useDocumentTitle";
 import { useAuth } from "../contexts/AuthContext";
-import { useFlowWorkerActivity } from "./flows/useFlowWorkerActivity";
 import { useWebSocketChannel } from "../hooks/useWebSocket";
 import { getActivityPollIntervalMs } from "../utils/requestScheduling.js";
 import { PageSectionMobileNav } from "../components/PageSectionMobileNav";
@@ -21,19 +21,19 @@ import {
   mergeActivityRequests,
 } from "./activity/activityListUtils";
 import ActivityRequestRow from "./activity/ActivityRequestRow";
+import ActivityToolbar from "./activity/ActivityToolbar";
+import ActivityMissingPage from "./activity/ActivityMissingPage";
+import ActivityInfoModal from "./activity/ActivityInfoModal";
 
-import { Navigate, useNavigate, useParams } from "react-router-dom";
-import { Loader, AlertCircle, Music } from "lucide-react";
+import { Navigate, useLocation, useNavigate, useParams } from "react-router-dom";
+import { AlertCircle, Music } from "lucide-react";
+import { DotLoader } from "../components/DotLoader";
+import { queryClient, queryKeys } from "../queryClient.js";
 const ACTIVITY_PAGE_SIZE = 25;
 
 const QUEUE_EMPTY_STATE = {
-  title: "Queue is empty",
-  message: "Active album requests and downloads will appear here.",
-};
-
-const REVIEW_EMPTY_STATE = {
-  title: "No tracks to review",
-  message: "Downloaded tracks that need your approval will appear here.",
+  title: "Nothing queued",
+  message: "Active requests, downloads, and tracks waiting for review will appear here.",
 };
 
 const HISTORY_EMPTY_STATE = {
@@ -43,45 +43,110 @@ const HISTORY_EMPTY_STATE = {
 
 function ActivityPage() {
   const navigate = useNavigate();
+  const location = useLocation();
   const { view: viewParam } = useParams();
   const { user } = useAuth();
   const hasFlowAccess = user?.role === "admin" || !!user?.permissions?.accessFlow;
-  const { hasReview: hasReviewAlert } = useFlowWorkerActivity({ enabled: hasFlowAccess });
-  const [requests, setRequests] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
+  const [localError, setLocalError] = useState(null);
   const [visibleCount, setVisibleCount] = useState(ACTIVITY_PAGE_SIZE);
   const [reSearchingAlbumIds, setReSearchingAlbumIds] = useState({});
   const [approvingJobId, setApprovingJobId] = useState(null);
   const [denyingJobId, setDenyingJobId] = useState(null);
   const [jobErrors, setJobErrors] = useState({});
-  const fetchRequestsInFlightRef = useRef(false);
+  const [filterValue, setFilterValue] = useState("");
+  const [refreshing, setRefreshing] = useState(false);
+  const [infoRequest, setInfoRequest] = useState(null);
 
   const { playTrack, currentTrack, isPlaying, togglePlayPause } = useAudioQueue();
 
   const activeView = normalizeActivityView(viewParam);
   const isQueueView = activeView === "queue";
-  const isReviewView = activeView === "review";
   const isHistoryView = activeView === "history";
-  const isListLikeView = isQueueView || isReviewView;
+  const isMissingView = activeView === "missing";
+  const isCutoffView = new URLSearchParams(location.search).get("tab") === "cutoff";
+  const isListLikeView = isQueueView;
   const shouldRedirectView = viewParam && normalizeActivityView(viewParam) !== viewParam;
-
+  const activeViewLabel = isMissingView
+    ? isCutoffView ? "Cutoff unmet" : "Missing"
+    : ACTIVITY_VIEWS.find((entry) => entry.id === activeView)?.label || "Activity";
   useDocumentTitle(
-    isQueueView ? "Queue - Activity"
-    : isReviewView ? "Review - Activity"
+    isQueueView ? "Queued - Activity"
     : isHistoryView ? "History - Activity"
+    : isMissingView ? `${isCutoffView ? "Cutoff unmet" : "Missing"} - Wanted`
     : "Activity",
   );
 
+  const activityQueryKey = useMemo(
+    () => queryKeys.activityRequests(user?.id),
+    [user?.id],
+  );
+  const refreshFromStatusEvent = useCallback(() => {
+    if (document.hidden) return;
+    queryClient.refetchQueries({
+      queryKey: isMissingView ? queryKeys.playlistJobs() : activityQueryKey,
+      type: "active",
+    });
+  }, [activityQueryKey, isMissingView]);
+  const { isConnected: downloadsWsConnected } = useWebSocketChannel(
+    "downloads",
+    (message) => {
+      if (message?.type === "download_statuses") refreshFromStatusEvent();
+    },
+  );
+  const { isConnected: playlistsWsConnected } = useWebSocketChannel(
+    "weekly-flow",
+    (message) => {
+      if (message?.type === "playlist_status") refreshFromStatusEvent();
+    },
+    { enabled: hasFlowAccess },
+  );
+  const activityWsConnected = downloadsWsConnected && (!hasFlowAccess || playlistsWsConnected);
+  const activityQuery = useQuery({
+    queryKey: activityQueryKey,
+    queryFn: ({ signal }) => getRequests({ refresh: isListLikeView, signal }),
+    enabled: !isMissingView,
+    staleTime: isListLikeView ? 0 : 30_000,
+    refetchInterval: isMissingView
+      ? false
+      : getActivityPollIntervalMs({ isConnected: activityWsConnected, isListLikeView }),
+    refetchIntervalInBackground: false,
+  });
+  const requests = useMemo(
+    () => mergeActivityRequests([], activityQuery.data),
+    [activityQuery.data],
+  );
+  const loading = activityQuery.isPending;
+  const error = localError || activityQuery.error?.response?.data?.message || activityQuery.error?.message;
+
   const filteredRequests = useMemo(
-    () => requests.filter((request) => matchesActivityView(request, activeView)),
-    [requests, activeView],
+    () => {
+      const query = filterValue.trim().toLocaleLowerCase();
+      return requests.filter((request) => {
+        if (!matchesActivityView(request, activeView)) return false;
+        if (!query) return true;
+        return [
+          request.title,
+          request.name,
+          request.trackName,
+          request.albumName,
+          request.artistName,
+          request.subtitle,
+          request.statusLabel,
+        ]
+          .filter(Boolean)
+          .join(" ")
+          .toLocaleLowerCase()
+          .includes(query);
+      });
+    },
+    [activeView, filterValue, requests],
   );
 
   const sortedRequests = useMemo(
     () => [...filteredRequests].sort(compareActivityRequests),
     [filteredRequests],
   );
+  const hasActivityFilter = filterValue.trim().length > 0;
 
   const visibleRequests = useMemo(
     () => sortedRequests.slice(0, visibleCount),
@@ -106,58 +171,41 @@ function ActivityPage() {
   }, [activeView]);
 
   const fetchRequests = useCallback(async ({ silent = false, refresh = false } = {}) => {
-    if (fetchRequestsInFlightRef.current) return;
-    fetchRequestsInFlightRef.current = true;
-    if (!silent) {
-      setLoading(true);
-    }
-
     try {
-      const data = await getRequests({ refresh });
-      setRequests((previous) => mergeActivityRequests(previous, data));
-      setError(null);
-    } catch {
+      const result = await queryClient.fetchQuery({
+        queryKey: activityQueryKey,
+        queryFn: ({ signal }) => getRequests({ refresh: refresh || isListLikeView, signal }),
+        staleTime: refresh ? 0 : isListLikeView ? 0 : 30_000,
+      });
+      setLocalError(null);
+      return result;
+    } catch (requestError) {
       if (!silent) {
-        setError("Failed to load activity.");
+        setLocalError(requestError?.response?.data?.message || "Failed to load activity.");
       }
-    } finally {
-      fetchRequestsInFlightRef.current = false;
-      if (!silent) {
-        setLoading(false);
-      }
+      return null;
     }
-  }, []);
+  }, [activityQueryKey, isListLikeView]);
 
-  const refreshFromStatusEvent = useCallback(() => {
-    if (document.hidden) return;
-    fetchRequests({ silent: true, refresh: true });
+  const handleManualRefresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await fetchRequests({ silent: true, refresh: true });
+    } finally {
+      setRefreshing(false);
+    }
   }, [fetchRequests]);
 
-  const { isConnected: downloadsWsConnected } = useWebSocketChannel(
-    "downloads",
-    (message) => {
-      if (message?.type === "download_statuses") refreshFromStatusEvent();
-    },
-  );
-  const { isConnected: playlistsWsConnected } = useWebSocketChannel(
-    "weekly-flow",
-    (message) => {
-      if (message?.type === "playlist_status") refreshFromStatusEvent();
-    },
-    { enabled: hasFlowAccess },
-  );
-  const activityWsConnected = downloadsWsConnected && (!hasFlowAccess || playlistsWsConnected);
-
   useEffect(() => {
-    fetchRequests();
+    if (isMissingView) return undefined;
 
     const handleFocus = () => {
-      fetchRequests({ silent: true });
+      queryClient.refetchQueries({ queryKey: activityQueryKey, type: "active" });
     };
 
     const handleVisibility = () => {
       if (document.visibilityState === "visible") {
-        fetchRequests({ silent: true });
+        queryClient.refetchQueries({ queryKey: activityQueryKey, type: "active" });
       }
     };
 
@@ -168,19 +216,23 @@ function ActivityPage() {
       window.removeEventListener("focus", handleFocus);
       document.removeEventListener("visibilitychange", handleVisibility);
     };
-  }, [fetchRequests]);
+  }, [activityQueryKey, isMissingView]);
 
-  useEffect(() => {
-    const intervalMs = getActivityPollIntervalMs({
-      isConnected: activityWsConnected,
-      isListLikeView,
+  const updateRequests = useCallback((updater) => {
+    queryClient.setQueryData(activityQueryKey, (current) => {
+      const next = Array.isArray(current) ? current : [];
+      return updater(next);
     });
-    const interval = setInterval(() => {
-      if (document.hidden) return;
-      fetchRequests({ silent: true });
-    }, intervalMs);
-    return () => clearInterval(interval);
-  }, [activityWsConnected, isListLikeView, fetchRequests]);
+  }, [activityQueryKey]);
+  const reSearchMutation = useMutation({
+    mutationFn: ({ albumId }) => triggerAlbumSearch(albumId),
+  });
+  const approveMutation = useMutation({
+    mutationFn: approveBlockedJob,
+  });
+  const denyMutation = useMutation({
+    mutationFn: denyBlockedJob,
+  });
 
   const navigateToArtist = useCallback(
     (request, isAlbum, artistMbid, artistName, displayName) => {
@@ -201,8 +253,8 @@ function ActivityPage() {
     if (!albumId || reSearchingAlbumIds[albumId]) return;
     setReSearchingAlbumIds((prev) => ({ ...prev, [albumId]: true }));
     try {
-      await triggerAlbumSearch(albumId);
-      setRequests((prev) =>
+      await reSearchMutation.mutateAsync({ albumId });
+      updateRequests((prev) =>
         prev.map((item) =>
           String(item.albumId) === String(albumId)
             ? {
@@ -219,7 +271,7 @@ function ActivityPage() {
         ),
       );
     } catch {
-      setError("Failed to trigger album search.");
+      setLocalError("Failed to trigger album search.");
     } finally {
       setReSearchingAlbumIds(({ [albumId]: _, ...prev }) => prev);
     }
@@ -229,8 +281,8 @@ function ActivityPage() {
     if (!jobId || approvingJobId === jobId) return;
     setApprovingJobId(jobId);
     try {
-      await approveBlockedJob(jobId);
-      setRequests((prev) =>
+      await approveMutation.mutateAsync(jobId);
+      updateRequests((prev) =>
         prev.map((r) =>
           r.jobId === jobId
             ? {
@@ -258,8 +310,8 @@ function ActivityPage() {
     if (!jobId || denyingJobId === jobId) return;
     setDenyingJobId(jobId);
     try {
-      await denyBlockedJob(jobId);
-      setRequests((prev) =>
+      await denyMutation.mutateAsync(jobId);
+      updateRequests((prev) =>
         prev.map((r) =>
           r.jobId === jobId
             ? {
@@ -315,34 +367,24 @@ function ActivityPage() {
     [navigate, navigateToArtist],
   );
 
-  const emptyState = isQueueView
-    ? QUEUE_EMPTY_STATE
-    : isReviewView
-      ? REVIEW_EMPTY_STATE
-      : HISTORY_EMPTY_STATE;
+  const emptyState = isQueueView ? QUEUE_EMPTY_STATE : HISTORY_EMPTY_STATE;
 
-  const activitySections = useMemo(
-    () =>
-      ACTIVITY_VIEWS.map((entry) => ({
-        id: entry.id,
-        label:
-          entry.id === "review" && hasReviewAlert ? `${entry.label} (needs review)` : entry.label,
-      })),
-    [hasReviewAlert],
-  );
+  const activitySections = ACTIVITY_VIEWS;
 
   const pageHeader = (
     <>
-      <header className="requests-page__header">
-        <h1 className="page-title">Activity</h1>
+      <header className="activity-page__header">
+        <h1 className="page-title">{activeViewLabel}</h1>
       </header>
-      <PageSectionMobileNav
-        sections={activitySections}
-        activeId={activeView}
-        label="Activity"
-        getSectionPath={buildActivityPath}
-        selectId="activity-view-select"
-      />
+      {!isMissingView ? (
+        <PageSectionMobileNav
+          sections={activitySections.filter((entry) => entry.id !== "missing")}
+          activeId={activeView}
+          label="Activity"
+          getSectionPath={buildActivityPath}
+          selectId="activity-view-select"
+        />
+      ) : null}
     </>
   );
 
@@ -354,30 +396,51 @@ function ActivityPage() {
     return <Navigate to={buildActivityPath(activeView)} replace />;
   }
 
+  if (isMissingView) {
+    return (
+      <div className="activity-page">
+        {pageHeader}
+        <ActivityMissingPage />
+      </div>
+    );
+  }
+
   if (loading) {
     return (
-      <div className="requests-page">
+      <div className="activity-page">
         {pageHeader}
-        <div className="artist-loading">
-          <Loader className="artist-spinner artist-spinner--large animate-spin" />
+        <ActivityToolbar
+          filterValue={filterValue}
+          onFilterChange={setFilterValue}
+          onRefresh={handleManualRefresh}
+          refreshing={refreshing}
+        />
+        <div className="activity-page__loading" role="status" aria-label="Loading activity">
+          <DotLoader size="2xl" label={null} />
         </div>
       </div>
     );
   }
 
   return (
-    <div className="requests-page">
+    <div className="activity-page">
       {pageHeader}
+      <ActivityToolbar
+        filterValue={filterValue}
+        onFilterChange={setFilterValue}
+        onRefresh={handleManualRefresh}
+        refreshing={refreshing}
+      />
 
       {error && (
-        <div className="artist-error-panel requests-page__error" role="alert">
+        <div className="artist-error-panel activity-page__error" role="alert">
           <AlertCircle className="artist-error-icon" aria-hidden="true" />
           <h2 className="artist-error-title">Unable to load activity</h2>
           <p className="artist-error-copy">{error}</p>
           <button
             type="button"
             onClick={() => fetchRequests()}
-            className="btn btn-secondary btn--bold btn-min-h requests-page__retry-button"
+            className="btn btn-secondary btn--bold btn-min-h"
           >
             Try Again
           </button>
@@ -386,17 +449,23 @@ function ActivityPage() {
 
       {filteredRequests.length === 0 ? (
         !error && (
-          <div className="search-empty-panel">
+          <div className="search-empty-panel activity-page__empty">
             <div className="search-empty-panel__icon" aria-hidden="true">
               <Music className="artist-icon-lg" />
             </div>
-            <h2 className="search-empty-panel__title">{emptyState.title}</h2>
-            <p className="search-empty-panel__message">{emptyState.message}</p>
-            {isQueueView && (
+            <h2 className="search-empty-panel__title">
+              {hasActivityFilter ? "No matches" : emptyState.title}
+            </h2>
+            <p className="search-empty-panel__message">
+              {hasActivityFilter
+                ? "No activity matches the current filter."
+                : emptyState.message}
+            </p>
+            {isQueueView && !hasActivityFilter && (
               <button
                 type="button"
                 onClick={() => navigate("/")}
-                className="btn btn-primary btn--bold btn-min-h requests-page__empty-action"
+                className="btn btn-primary btn--bold btn-min-h"
               >
                 Start Discovering
               </button>
@@ -404,13 +473,12 @@ function ActivityPage() {
           </div>
         )
       ) : (
-        <div className="requests-page__list">
+        <div className="activity-list">
           {(() => {
-            let rowIndex = 0;
             return listEntries.map((entry) => {
               if (entry.type === "date") {
                 return (
-                  <div key={entry.key} className="requests-page__date-group">
+                  <div key={entry.key} className="activity-list__date-group">
                     {entry.label}
                   </div>
                 );
@@ -419,7 +487,6 @@ function ActivityPage() {
                 <ActivityRequestRow
                   key={entry.key}
                   request={entry.request}
-                  rowIndex={rowIndex}
                   reSearchingAlbumIds={reSearchingAlbumIds}
                   approvingJobId={approvingJobId}
                   denyingJobId={denyingJobId}
@@ -431,14 +498,14 @@ function ActivityPage() {
                   onApprove={handleApproveBlockedJob}
                   onDeny={handleDenyBlockedJob}
                   onPreview={handleReviewPreview}
+                  onInfo={setInfoRequest}
                 />
               );
-              rowIndex += 1;
               return row;
             });
           })()}
           {hasMoreItems && (
-            <div className="requests-page__load-more">
+            <div className="activity-list__load-more">
               <button
                 type="button"
                 onClick={() => setVisibleCount((count) => count + ACTIVITY_PAGE_SIZE)}
@@ -450,6 +517,7 @@ function ActivityPage() {
           )}
         </div>
       )}
+      <ActivityInfoModal item={infoRequest} onClose={() => setInfoRequest(null)} />
     </div>
   );
 }

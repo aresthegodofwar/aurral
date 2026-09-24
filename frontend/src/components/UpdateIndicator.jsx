@@ -5,6 +5,7 @@ import {
   normalizeReleaseVersion,
   selectNightlyUpdate,
 } from "../../../lib/release-version";
+import TooltipButton from "./TooltipButton";
 
 const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const NIGHTLY_CHECK_INTERVAL_MS = 2 * 60 * 60 * 1000;
@@ -42,6 +43,7 @@ const UpdateIndicator = ({ currentVersion, visible = true }) => {
   const [updateInfo, setUpdateInfo] = useState(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const indicatorRef = useRef(null);
+  const triggerRef = useRef(null);
   const resolvedVersion = currentVersion || import.meta.env.VITE_APP_VERSION;
   const repo = import.meta.env.VITE_GITHUB_REPO || "lklynet/aurral";
   const releaseChannel = (import.meta.env.VITE_RELEASE_CHANNEL || "stable").toLowerCase();
@@ -162,7 +164,10 @@ const UpdateIndicator = ({ currentVersion, visible = true }) => {
       }
     };
     const handleKeyDown = (event) => {
-      if (event.key === "Escape") setMenuOpen(false);
+      if (event.key === "Escape") {
+        setMenuOpen(false);
+        triggerRef.current?.focus();
+      }
     };
     document.addEventListener("mousedown", handlePointerDown);
     document.addEventListener("keydown", handleKeyDown);
@@ -179,16 +184,16 @@ const UpdateIndicator = ({ currentVersion, visible = true }) => {
 
   return (
     <div ref={indicatorRef} className="app-update-indicator">
-      <button
-        type="button"
+      <TooltipButton
+        ref={triggerRef}
+        label={updateLabel}
         className={`app-header-link app-update-indicator__trigger is-available${menuOpen ? " is-open" : ""}`}
         onClick={() => setMenuOpen((open) => !open)}
-        aria-label={updateLabel}
         aria-haspopup="dialog"
         aria-expanded={menuOpen}
       >
         <Download aria-hidden="true" />
-      </button>
+      </TooltipButton>
 
       {menuOpen && (
         <div className="app-update-indicator__popover" role="dialog" aria-label="Update preview">

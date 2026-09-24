@@ -1,5 +1,7 @@
 import axios from "../../lib/axiosFetch.js";
 import crypto from "crypto";
+import { AURRAL_FLOWS_DIR } from "./playlistPaths.js";
+import { readPlaylistPages, requirePlaylistPath } from "./playback/playlistUsage.js";
 
 const PLEX_TV = "https://plex.tv";
 const PLEX_AUTH_APP = "https://app.plex.tv";
@@ -194,7 +196,7 @@ export class PlexClient {
     throw lastError || new Error("Plex switch-user request failed");
   }
 
-  async request(path, { params = {}, method = "GET", data = null } = {}) {
+  async request(path, { params = {}, method = "GET", data = null, timeout = 0 } = {}) {
     if (!this.isConfigured()) throw new Error("Plex not configured");
     try {
       const response = await axios({
@@ -202,6 +204,7 @@ export class PlexClient {
         url: `${this.url}${path}`,
         params,
         data,
+        timeout,
         headers: PlexClient.plexHeaders(this.clientId, { token: this.token }),
       });
       return response.data;
@@ -248,6 +251,11 @@ export class PlexClient {
   async ensureWeeklyFlowLibrary(libraryPath) {
     if (!this.isConfigured()) return null;
     const name = "Aurral";
+    const flowRoot = libraryPath.replace(/\/+$/, "");
+    const locations = [
+      libraryPath,
+      `${flowRoot}/${AURRAL_FLOWS_DIR}`,
+    ];
     // Also match the legacy "Aurral Flow" name so existing libraries are reused
     // and renamed rather than duplicated.
     const findExisting = (libs) =>
@@ -255,7 +263,7 @@ export class PlexClient {
         (lib) =>
           lib.title === name ||
           lib.title === "Aurral Flow" ||
-          (lib.Location || []).some((loc) => loc.path === libraryPath),
+          (lib.Location || []).some((loc) => locations.includes(loc.path)),
       );
 
     const existing = findExisting(await this.getLibraries());
@@ -263,11 +271,13 @@ export class PlexClient {
       // Reconcile name + folder so a rename or a changed downloads-path setting
       // actually takes effect (Plex keeps the originals otherwise).
       const currentLocations = (existing.Location || []).map((loc) => loc.path).filter(Boolean);
-      const locationOk = currentLocations.length === 1 && currentLocations[0] === libraryPath;
+      const locationOk =
+        currentLocations.length === locations.length &&
+        locations.every((location) => currentLocations.includes(location));
       const nameOk = existing.title === name;
       if (!locationOk || !nameOk) {
         try {
-          await this.editLibrary(existing.key, { name, locations: [libraryPath] });
+          await this.editLibrary(existing.key, { name, locations });
           return findExisting(await this.getLibraries()) || existing;
         } catch (err) {
           console.warn(
@@ -283,17 +293,15 @@ export class PlexClient {
     // is inconsistent across versions, so we create then re-read the section
     // list to resolve the new library (and its `key`) reliably.
     try {
-      await this.request("/library/sections", {
-        method: "POST",
-        params: {
-          name,
-          type: MUSIC_SECTION_TYPE,
-          agent: MUSIC_AGENT,
-          scanner: MUSIC_SCANNER,
-          language: "en-US",
-          location: libraryPath,
-        },
+      const params = new URLSearchParams({
+        name,
+        type: MUSIC_SECTION_TYPE,
+        agent: MUSIC_AGENT,
+        scanner: MUSIC_SCANNER,
+        language: "en-US",
       });
+      for (const location of locations) params.append("location", location);
+      await this.request(`/library/sections?${params.toString()}`, { method: "POST" });
     } catch (err) {
       const detail = err?.response?.data || err.message;
       const status = err?.response?.status;
@@ -391,6 +399,32 @@ export class PlexClient {
       params: { playlistType: "audio" },
     });
     return data?.MediaContainer?.Metadata || [];
+  }
+
+  async getPlaylistTrackPaths(excludedIds = new Set()) {
+    const read = (endpoint, params = {}) => readPlaylistPages(async (start) => {
+      const data = await this.request(endpoint, { timeout: 30_000, params: {
+        ...params, "X-Plex-Container-Start": start, "X-Plex-Container-Size": 200,
+      } });
+      const container = data?.MediaContainer;
+      return {
+        items: container?.Metadata ?? (container?.size === 0 ? [] : undefined),
+        total: container?.totalSize,
+      };
+    });
+    const playlists = await read("/playlists", { playlistType: "audio", type: 15 });
+    const paths = new Set();
+    for (const playlist of playlists) {
+      if (!playlist?.ratingKey) throw new Error("Plex playlist is missing its ID");
+      if (excludedIds.has(String(playlist.ratingKey))) continue;
+      const entries = await read(`/playlists/${encodeURIComponent(playlist.ratingKey)}/items`);
+      for (const entry of entries) {
+        const parts = (entry.Media || []).flatMap((media) => media.Part || []);
+        if (!parts.length) throw new Error("Plex playlist track has no media path");
+        for (const part of parts) paths.add(requirePlaylistPath(part.file));
+      }
+    }
+    return [...paths];
   }
 
   async getPlaylistItems(playlistRatingKey) {

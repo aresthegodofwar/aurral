@@ -27,7 +27,7 @@ import {
 } from "../services/discovery/index.js";
 import { getCachedArtistCount } from "../services/libraryManager.js";
 import { logger } from "../services/logger.js";
-import { PLAYLIST_LIBRARY_DIR, resolvePlaylistRoot } from "../services/playlistPaths.js";
+import { resolvePlaylistRoot } from "../services/playlistPaths.js";
 import { getFilesystemBrowseRoots } from "../services/downloadFolderConfig.js";
 import { dbOps } from "../db/helpers/index.js";
 import { db } from "../config/db-sqlite.js";
@@ -37,6 +37,7 @@ import { noCache } from "../middleware/cache.js";
 import { requireAuth } from "../middleware/requirePermission.js";
 import { getImageProxyCacheSizeBytes } from "../services/imageProxyService.js";
 import { getDownloadSourceStatus } from "../services/downloadSourceService.js";
+import { getMatcherRuntimeStatus } from "../services/trackMatching/index.js";
 import {
   DISCOVERY_PROVIDER_LASTFM,
   DISCOVERY_PROVIDER_LISTENBRAINZ_FALLBACK,
@@ -154,10 +155,6 @@ async function computeDiskSpacePayload(settings) {
     { location: dataDir, role: "App data" },
     { location: path.dirname(dbPath), role: "Database" },
     { location: downloadRoot, role: "Downloads" },
-    {
-      location: path.join(downloadRoot, PLAYLIST_LIBRARY_DIR),
-      role: "Playlist library",
-    },
     ...getFilesystemBrowseRoots().map((location) => ({
       location,
       role: "Browse root",
@@ -239,6 +236,17 @@ async function buildSystemPayload(settings) {
   };
 }
 
+function serializeBootstrapMatcherStatus(status, authenticated) {
+  if (authenticated) return status;
+  return {
+    available: Boolean(status.available),
+    checked: Boolean(status.checked),
+    error: status.error
+      ? { code: status.error.code || "matcher_error" }
+      : null,
+  };
+}
+
 function buildBootstrapPayload(req) {
   lidarrClient.updateConfig();
   const settings = dbOps.getSettings();
@@ -261,6 +269,10 @@ function buildBootstrapPayload(req) {
     dateTimeFormat: settings.dateTimeFormat,
     timestamp: new Date().toISOString(),
     appVersion: APP_VERSION,
+    matcher: serializeBootstrapMatcherStatus(
+      getMatcherRuntimeStatus(),
+      Boolean(currentUser),
+    ),
   };
 
   if (currentUser) {
@@ -293,6 +305,7 @@ function buildBootstrapPayload(req) {
     payload.sabnzbdConfigured = downloadSources.usenet.sabnzbdConfigured;
     payload.usenetConfigured = downloadSources.usenet.configured;
     payload.ytdlpConfigured = downloadSources.ytdlp.configured;
+    payload.deemixConfigured = downloadSources.deemix.configured;
     payload.downloadSources = downloadSources;
     payload.metadataProviders = getMetadataProviderHealthSnapshot();
     payload.localNetworkBypass = getLocalNetworkBypassStatus(req);
@@ -342,6 +355,8 @@ router.get("/", noCache, async (req, res) => {
         lastScan: null,
       };
       const discoveryUpdateStatus = getDiscoveryUpdateStatus();
+      const artworkLinkCount = dbOps.countImages();
+      const nativeImageCacheSizeBytes = await getImageProxyCacheSizeBytes();
       payload.discovery = {
         provider: getLastfmApiKey()
           ? DISCOVERY_PROVIDER_LASTFM
@@ -352,8 +367,10 @@ router.get("/", noCache, async (req, res) => {
         ...discoveryUpdateStatus,
         recommendationsCount: discoveryCache?.recommendations?.length || 0,
         globalTopCount: discoveryCache?.globalTop?.length || 0,
-        cachedImagesCount: dbOps.countImages(),
-        cachedImagesSizeBytes: await getImageProxyCacheSizeBytes(),
+        artworkLinkCount,
+        nativeImageCacheSizeBytes,
+        cachedImagesCount: artworkLinkCount,
+        cachedImagesSizeBytes: nativeImageCacheSizeBytes,
       };
       payload.websocket = {
         clients: wsStats.totalClients,

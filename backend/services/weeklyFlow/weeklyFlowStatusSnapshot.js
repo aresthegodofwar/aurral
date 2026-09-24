@@ -3,7 +3,7 @@ import { weeklyFlowWorker } from "./weeklyFlowWorker.js";
 import { buildSharedTrackIdentity, flowPlaylistConfig } from "./weeklyFlowPlaylistConfig.js";
 import { weeklyFlowOperationQueue } from "./weeklyFlowOperationQueue.js";
 import { getWeeklyFlowOperationWorkerStatus } from "./weeklyFlowOperationWorker.js";
-import { slskdClient } from "../slskdClient.js";
+import { getDownloadClient } from "../download/downloadClientSettings.js";
 import { userOps } from "../../db/helpers/index.js";
 import { getFlowCapabilities } from "../listenbrainzDiscoveryFallback.js";
 
@@ -68,6 +68,28 @@ function collectPlaylistTrackIdentities(playlist) {
   return identities;
 }
 
+function collectPlaylistTrackEntries(playlist) {
+  const playlistId = String(playlist?.id || "");
+  if (!playlistId) return [];
+  return downloadTracker
+    .getByPlaylistType(playlistId)
+    .filter((job) =>
+      [
+        job?.artistName,
+        job?.trackName,
+        job?.albumName,
+        job?.artistMbid,
+        job?.albumMbid,
+        job?.trackMbid,
+        job?.releaseYear,
+      ].some((value) => String(value ?? "").trim()),
+    )
+    .map((job) => ({
+      id: job.id,
+      identity: buildSharedTrackIdentity(job),
+    }));
+}
+
 function buildOwnerMap(flows, sharedPlaylists) {
   const ownerIds = new Set();
   for (const item of [
@@ -109,7 +131,8 @@ export function getWeeklyFlowStatusSnapshot({
       Number(playlistStats?.pending || 0) +
       Number(playlistStats?.downloading || 0) +
       Number(playlistStats?.blocked || 0) +
-      Number(playlistStats?.done || 0);
+      Number(playlistStats?.done || 0) +
+      Number(playlistStats?.failed || 0);
     return {
       id: playlist.id,
       name: playlist.name,
@@ -118,8 +141,11 @@ export function getWeeklyFlowStatusSnapshot({
       sourceFlowId: playlist.sourceFlowId,
       importedAt: playlist.importedAt,
       createdAt: playlist.createdAt,
-      trackCount: jobTotal > 0 ? jobTotal : playlist.trackCount,
+      trackCount: Math.max(jobTotal, Number(playlist.trackCount || 0)),
+      recordHistory: playlist.recordHistory !== false,
+      showTrackAvailability: playlist.showTrackAvailability === true,
       trackIdentities: collectPlaylistTrackIdentities(playlist),
+      trackEntries: collectPlaylistTrackEntries(playlist),
       importSource: playlist.importSource
         ? {
             provider: playlist.importSource.provider,
@@ -127,6 +153,7 @@ export function getWeeklyFlowStatusSnapshot({
             syncIntervalHours: playlist.importSource.syncEnabled
               ? playlist.importSource.syncIntervalHours
               : 0,
+            keepRemovedTracks: playlist.importSource.keepRemovedTracks !== false,
           }
         : null,
     };
@@ -144,7 +171,7 @@ export function getWeeklyFlowStatusSnapshot({
   const sharedStats = aggregateStats(scopedStats, sharedPlaylistIds);
   const nextRunMessage = formatNextRunMessage(flowsWithOwners);
   const operationQueue = weeklyFlowOperationQueue.getStatus();
-  const operationWorker = getWeeklyFlowOperationWorkerStatus();
+  const operationWorker = workerStatus?.operationWorker || getWeeklyFlowOperationWorkerStatus();
   const queueLabel = String(operationQueue?.currentLabel || operationWorker?.currentLabel || "");
   let phase = "idle";
   let message = "Idle";
@@ -196,7 +223,7 @@ export function getWeeklyFlowStatusSnapshot({
       ...workerStatus,
       stats,
     },
-    slskd: slskdClient.getStatus(),
+    slskd: getDownloadClient("slskd").getStatus(),
     stats,
     flowStats,
     sharedStats,

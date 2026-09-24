@@ -1,15 +1,14 @@
 import { useEffect, useState } from "react";
 import { resetDiscoveryFeedback } from "../../../utils/api/endpoints/discovery.js";
-import {
-  getThemePreference,
-  setThemePreference,
-} from "../../../utils/theme.js";
 import { SettingsInput, SettingsSelect } from "./SettingsField";
+import PillToggle from "../../../components/PillToggle";
 import { PlexSelfLinkSection } from "./PlexSelfLinkSection";
 import { ConnectedAccountsSection } from "./ConnectedAccountsSection";
+import { ThemeSettings } from "./ThemeSettings";
 
 import { Link } from "react-router-dom";
 import { RotateCcw } from "lucide-react";
+import { DotLoader } from "../../../components/DotLoader";
 export function SettingsAccountTab({
   listenHistoryProvider,
   setListenHistoryProvider,
@@ -30,9 +29,11 @@ export function SettingsAccountTab({
   showSuccess,
   showError,
   profileVariant = false,
+  showSidebarArt = false,
+  sidebarArtEnabled = true,
+  setSidebarArtEnabled,
 }) {
   const [resettingTastes, setResettingTastes] = useState(false);
-  const [theme, setTheme] = useState(getThemePreference);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -69,12 +70,15 @@ export function SettingsAccountTab({
   if (loading) {
     return (
       <div className={profileVariant ? "profile-settings" : "settings-page__panel"}>
-        <p className="settings-page__muted-copy">Loading…</p>
+        <p className="settings-page__muted-copy">
+          <DotLoader size="sm" label={null} /> Loading…
+        </p>
       </div>
     );
   }
 
   const profileSummary = (() => {
+    if (listenHistoryProvider === "local") return "Local only";
     if (listenHistoryProvider === "koito" && listenHistoryUrl) {
       return `Koito: ${listenHistoryUrl}`;
     }
@@ -101,37 +105,34 @@ export function SettingsAccountTab({
         <div className="settings-page__section profile-settings__section">
           <div className="settings-page__section-intro">
             <h3 className="settings-page__section-title">Appearance</h3>
-            <p className="settings-page__section-note">
-              Choose how Aurral looks on this device.
-            </p>
           </div>
-          <fieldset className="settings-page__fields profile-settings__fields">
-            <div className="profile-settings__field">
-              <label className="profile-settings__label" htmlFor="profile-theme">
-                Theme
-              </label>
-              <SettingsSelect
-                id="profile-theme"
-                value={theme}
-                onChange={(event) => setTheme(setThemePreference(event.target.value))}
-              >
-                <option value="system">System</option>
-                <option value="light">Light</option>
-                <option value="dark">Dark</option>
-              </SettingsSelect>
-              <p className="settings-page__hint">
-                System follows the appearance setting of your device.
-              </p>
-            </div>
-          </fieldset>
+          <ThemeSettings showSuccess={showSuccess} showError={showError} />
+          {profileVariant && showSidebarArt ? (
+            <fieldset className="settings-page__fields profile-settings__fields">
+              <div className="profile-settings__field">
+                <label className="profile-settings__label" htmlFor="profile-sidebar-art">
+                  Environment art
+                </label>
+                <PillToggle
+                  id="profile-sidebar-art"
+                  checked={sidebarArtEnabled}
+                  onChange={(event) => setSidebarArtEnabled(event.target.checked)}
+                  aria-label="Show sidebar environment art"
+                />
+                <p className="settings-page__hint">
+                  Show the nightly or preview environment art in the sidebar.
+                </p>
+              </div>
+            </fieldset>
+          ) : null}
         </div>
 
         <div className="settings-page__section profile-settings__section">
           <div className="settings-page__section-header">
             <div className="settings-page__section-intro">
-              <h3 className="settings-page__section-title">Listening History</h3>
+              <h3 className="settings-page__section-title">Listening history</h3>
               <p className="settings-page__section-note">
-                Connect a listening service to personalize discovery recommendations.
+                Connect a service to personalize discovery.
               </p>
             </div>
             {profileSummary ? (
@@ -146,14 +147,31 @@ export function SettingsAccountTab({
               <SettingsSelect
                 id="profile-history-provider"
                 value={listenHistoryProvider}
-                onChange={(e) => setListenHistoryProvider(e.target.value)}
+                onChange={(e) => {
+                  const provider = e.target.value;
+                  setListenHistoryProvider(provider);
+                  if (provider === "local") {
+                    setListenHistoryUsername("");
+                    setListenHistoryUrl("");
+                  }
+                }}
               >
+                <option value="local">Local only</option>
                 <option value="lastfm">Last.fm</option>
                 <option value="listenbrainz">ListenBrainz</option>
                 <option value="koito">Koito</option>
               </SettingsSelect>
+              <p className="settings-page__hint">
+                Select the service that supplies your listening history for personalized discovery.
+              </p>
             </div>
-            {listenHistoryProvider === "koito" ? (
+            {listenHistoryProvider === "local" ? (
+              <div className="profile-settings__field">
+                <p className="settings-page__hint">
+                  Uses Aurral play events only.
+                </p>
+              </div>
+            ) : listenHistoryProvider === "koito" ? (
               <div className="profile-settings__field">
                 <label className="profile-settings__label" htmlFor="profile-history-url">
                   Koito URL
@@ -168,8 +186,7 @@ export function SettingsAccountTab({
                   onChange={(e) => setListenHistoryUrl(e.target.value)}
                 />
                 <p className="settings-page__hint">
-                  Your self-hosted Koito instance URL. Aurral reads top artists from Koito&apos;s
-                  chart API to power personalized discovery.
+                  Aurral reads top artists from Koito for personalized discovery.
                 </p>
               </div>
             ) : (
@@ -190,8 +207,7 @@ export function SettingsAccountTab({
                   onChange={(e) => setListenHistoryUsername(e.target.value)}
                 />
                 <p className="settings-page__hint">
-                  Connect Last.fm or ListenBrainz for personalized discovery recommendations. Admin
-                  API defaults are in{" "}
+                  Aurral uses this profile for personalized discovery. Configure API credentials in{" "}
                   <Link to="/settings/connect" className="settings-page__link">
                     Settings → Connect
                   </Link>
@@ -216,10 +232,9 @@ export function SettingsAccountTab({
 
         <div className="settings-page__section profile-settings__section">
           <div className="settings-page__section-intro">
-            <h3 className="settings-page__section-title">Library Defaults</h3>
+            <h3 className="settings-page__section-title">Library defaults</h3>
             <p className="settings-page__section-note">
-              These defaults apply to one-click artist adds unless you override them from the
-              Customize action on the artist page.
+              Defaults for one-click artist adds. Profile values override them.
             </p>
           </div>
 
@@ -229,7 +244,7 @@ export function SettingsAccountTab({
           >
             <div className="profile-settings__field">
               <label className="profile-settings__label" htmlFor="profile-root-folder">
-                Default Root Folder
+                Default root folder
               </label>
               <SettingsSelect
                 id="profile-root-folder"
@@ -247,7 +262,7 @@ export function SettingsAccountTab({
 
             <div className="profile-settings__field">
               <label className="profile-settings__label" htmlFor="profile-quality-profile">
-                Default Quality Profile
+                Default quality profile
               </label>
               <SettingsSelect
                 id="profile-quality-profile"
@@ -275,23 +290,29 @@ export function SettingsAccountTab({
           )}
         </div>
 
-        <div className="settings-page__section profile-settings__section">
+        <div className="settings-page__section profile-settings__section profile-settings__section--action">
           <div className="settings-page__section-intro">
-            <h3 className="settings-page__section-title">Discovery Tastes</h3>
+            <h3 className="settings-page__section-title">Discovery tastes</h3>
             <p className="settings-page__section-note">
-              Clear your More like this and Less like this feedback so recommendations start fresh.
-              Manage hard exclusions on the <Link to="/blocklist" className="settings-page__link">Blocked Artists</Link> page.
+              Reset your recommendation feedback. Manage blocked artists separately.
+              {" "}<Link to="/blocklist" className="settings-page__link">Blocked artists</Link>
             </p>
           </div>
-          <button
-            type="button"
-            onClick={handleResetDiscoveryTastes}
-            disabled={resettingTastes}
-            className="btn btn-secondary btn-sm"
-          >
-            <RotateCcw className={`artist-icon-xs${resettingTastes ? " animate-spin" : ""}`} />
-            {resettingTastes ? "Resetting…" : "Reset Discovery Tastes"}
-          </button>
+          <div className="profile-settings__action">
+            <button
+              type="button"
+              onClick={handleResetDiscoveryTastes}
+              disabled={resettingTastes}
+              className="btn btn-secondary btn-sm"
+            >
+              {resettingTastes ? (
+                <DotLoader size="xs" label={null} />
+              ) : (
+                <RotateCcw className="artist-icon-xs" aria-hidden />
+              )}
+              {resettingTastes ? "Resetting…" : "Reset discovery tastes"}
+            </button>
+          </div>
         </div>
       </form>
     </div>

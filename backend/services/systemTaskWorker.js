@@ -1,8 +1,16 @@
 import createHonkerWorker from "./honkerWorkerFactory.js";
-import { getSystemTaskQueue } from "./honkerDb.js";
+import {
+  getInboxTaskQueue,
+  getMaintenanceTaskQueue,
+  getSystemTaskQueue,
+  PLAYLIST_STARTUP_MIGRATION_SETTING,
+  PLAYLIST_STARTUP_MIGRATION_VERSION,
+} from "./honkerDb.js";
 import { cleanExpiredSessions } from "../config/session-helpers.js";
+import { dbOps } from "../db/helpers/index.js";
+import { resolvePlaylistRoot } from "./playlistPaths.js";
 
-async function processSystemTask(payload = {}) {
+export async function processSystemTask(payload = {}, job = null) {
   const kind = String(payload?.kind || "").trim();
   switch (kind) {
     case "weekly-flow-refresh": {
@@ -49,6 +57,16 @@ async function processSystemTask(payload = {}) {
       await runDueImportSourceSyncs();
       return;
     }
+    case "library-index-refresh": {
+      return;
+    }
+    case "library-index-bootstrap": {
+      const { hasCompletedLibraryScan, scheduleLibraryScan } = await import(
+        "./libraryScanWorker.js"
+      );
+      if (!hasCompletedLibraryScan()) scheduleLibraryScan();
+      return;
+    }
     case "weekly-flow-startup-check": {
       const { startWorkerIfPending } = await import("./weeklyFlow/weeklyFlowScheduler.js");
       await startWorkerIfPending();
@@ -60,8 +78,24 @@ async function processSystemTask(payload = {}) {
       return;
     }
     case "inbox-refresh": {
-      const { refreshInboxForAllUsers } = await import("./inboxService.js");
-      await refreshInboxForAllUsers();
+      const {
+        enqueueInboxRefreshForAllUsers,
+        refreshInboxForUser,
+      } = await import("./inboxService.js");
+      const userId = Number(payload.userId);
+      if (Number.isInteger(userId) && userId > 0) {
+        await refreshInboxForUser(userId, {
+          force: true,
+          throwOnFailure: true,
+          jobId: job?.id || payload.jobId || null,
+          zipCode: payload.zipCode || "",
+          ipAddress: payload.ipAddress || "",
+        });
+      } else {
+        await enqueueInboxRefreshForAllUsers({
+          reason: payload.reason || "scheduled",
+        });
+      }
       return;
     }
     case "news-refresh": {
@@ -71,24 +105,48 @@ async function processSystemTask(payload = {}) {
     }
     case "playlist-startup-migration": {
       const [
-        { migrateLegacyPaths, resolvePlaylistRoot },
+        migrationModule,
+        { ensurePlaylistFilesystemLayout },
         trackerModule,
-        { playlistManager },
         { repairYtdlpMetadata },
       ] = await Promise.all([
-        import("./playlistPaths.js"),
+        import("./aurralDownloadFolderMigration.js"),
+        import("./playlistFilesystemMigration.js"),
         import("./weeklyFlow/weeklyFlowDownloadTracker.js"),
-        import("./weeklyFlow/weeklyFlowPlaylistManager.js"),
         import("./playlistDownloadUtils.js"),
       ]);
-      const result = await migrateLegacyPaths(
-        resolvePlaylistRoot(),
-        trackerModule.downloadTracker,
-      );
-      if (result.migrated > 0) {
+      const { migrateAurralDownloadFolder } = migrationModule;
+      const layout = ensurePlaylistFilesystemLayout();
+      let result = {
+        migrated: 0,
+        flowMigrated: 0,
+        removed: 0,
+        retained: 0,
+        failed: 0,
+      };
+      try {
+        result = await migrateAurralDownloadFolder();
+      } catch (error) {
+        console.error(`[Playlists] Aurral download folder migration failed: ${error.message}`);
+        throw error;
+      }
+      const flowMigrated = result.flowMigrated || 0;
+      const permanentMigrated = (result.migrated || 0) - flowMigrated;
+      if (result.migrated > 0 || result.removed > 0) {
         console.log(
-          `[Playlists] Migrated ${result.migrated} legacy track paths to ${resolvePlaylistRoot()}`,
+          `[Playlists] Migrated ${permanentMigrated} permanent track(s) and ${flowMigrated} flow track(s), and removed ${result.removed} unkept flow file(s)`,
         );
+      }
+      if (result.repaired > 0) {
+        console.log(`[Playlists] Repaired ${result.repaired} migrated tracker path(s)`);
+      }
+      if (result.retained > 0 || result.failed > 0) {
+        console.warn(
+          `[Playlists] Retained ${result.retained} item(s) and failed ${result.failed} migration item(s) for review`,
+        );
+      }
+      if (result.status === "blocked" || result.failed > 0) {
+        throw new Error("Playlist filesystem migration requires review before playlist rebuild");
       }
       const metadataRepair = await repairYtdlpMetadata(
         trackerModule.downloadTracker.getAll(),
@@ -103,14 +161,31 @@ async function processSystemTask(payload = {}) {
           `[Playlists] Could not add metadata to ${metadataRepair.failed} yt-dlp track(s)`,
         );
       }
-      playlistManager.updateConfig(false);
-      await playlistManager.ensurePlaylists();
-      await playlistManager.scheduleScanLibrary(true);
+      if (
+        layout.sidecarsMoved > 0 ||
+        result.migrated > 0 ||
+        result.removed > 0 ||
+        metadataRepair.repaired > 0
+      ) {
+        const { playlistManager } = await import("./weeklyFlow/weeklyFlowPlaylistManager.js");
+        playlistManager.updateConfig(false);
+        await playlistManager.ensurePlaylists();
+      }
+      if (metadataRepair.failed === 0) {
+        dbOps.setJSONSetting(PLAYLIST_STARTUP_MIGRATION_SETTING, {
+          version: PLAYLIST_STARTUP_MIGRATION_VERSION,
+          rootPath: resolvePlaylistRoot(),
+          completedAt: Date.now(),
+        });
+      }
       return;
     }
     case "lidarr-retry": {
       const { libraryManager } = await import("./libraryManager.js");
-      await libraryManager.getAllArtists();
+      await libraryManager.syncLidarrArtists({ forceRefresh: true });
+      if (process.connected && process.send) {
+        process.send({ type: "cache-invalidate", cache: "lidarr-artists" });
+      }
       return;
     }
     default:
@@ -135,3 +210,26 @@ export {
   stopSystemTaskWorker,
   isSystemTaskWorkerRunning,
 };
+
+const { start: startMaintenanceTaskWorker } = createHonkerWorker({
+  name: "system-task-maintenance",
+  getQueue: getMaintenanceTaskQueue,
+  processJob: processSystemTask,
+  idlePollS: 10,
+  retryDelayS: 120,
+  onJobSuccess(payload) {
+    if (payload?.kind === "news-refresh" && process.connected && process.send) {
+      process.send({ type: "cache-invalidate", cache: "news" });
+    }
+  },
+});
+
+const { start: startInboxTaskWorker } = createHonkerWorker({
+  name: "system-task-inbox",
+  getQueue: getInboxTaskQueue,
+  processJob: processSystemTask,
+  idlePollS: 10,
+  retryDelayS: 120,
+});
+
+export { startMaintenanceTaskWorker, startInboxTaskWorker };

@@ -26,10 +26,10 @@ Aurral is the Lidarr companion for self-hosted music discovery. Best-in-class re
 - **Discover**: Best-in-class personalized recommendations, trends, tags, recent releases, discover playlists, and nearby shows.
 - **Search**: Find artists and albums, preview tracks, and add to Lidarr with your defaults.
 - **Library**: Browse and search artists already in Lidarr.
-- **Playlists**: Run scheduled flows, adopt discover playlists like Release Radar, import spotify playlists, and convert flows to fixed tracklists.
-- **Activity**: Queue, review, and history for Lidarr requests, yt-dlp / slskd / Usenet downloads, and Aurral playlist jobs.
+- **Playlists**: Run scheduled flows, adopt discover playlists like Release Radar, import Spotify, Last.fm, or ListenBrainz playlists, and convert flows to fixed tracklists.
+- **Activity**: Queue and history for Lidarr requests, yt-dlp / slskd / Usenet downloads, plus Wanted actions for Aurral playlist jobs.
 - **Integrations**: Lidarr, Last.fm, ListenBrainz, Koito, yt-dlp, slskd, SABnzbd/NZBGet, Navidrome, Plex, Ticketmaster, Gotify, and webhooks.
-- **Playback**: Stream through Navidrome (M3U playlists) or Plex/Plexamp (API-synced playlists) from a dedicated download folder.
+- **Playback**: Stream through API-synced Navidrome or Plex/Plexamp playlists from a dedicated download folder.
 - **Multi-user**: Per-user profiles, discovery layout, permissions, local auth, LAN auto-login, reverse-proxy SSO, and native OIDC.
 
 ## Screenshots
@@ -69,7 +69,7 @@ Set `MEDIA_ROOT` to the **same host media path that Lidarr already mounts**. Kee
 docker compose up -d
 ```
 
-Open `http://localhost:3001`, create your admin account, and connect Lidarr.
+Open `http://localhost:3001` and create your admin account. Connect Lidarr if you want managed library changes and provider status.
 
 Want the latest merged changes? Use `ghcr.io/lklynet/aurral:nightly`. Nightly
 builds may be less stable than releases; see the [Docker image channels](https://docs.aurral.org/getting-started/docker/#which-image-tag-to-use).

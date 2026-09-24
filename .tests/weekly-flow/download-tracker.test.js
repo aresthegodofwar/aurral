@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import Database from "better-sqlite3";
 
 import {
   setupIsolatedBackend,
@@ -9,15 +10,17 @@ import {
   resetDatabase,
 } from "../helpers/backendTestHarness.js";
 
-const [isolatedState, { db }, { dbOps }, trackerModule, qualityProfileService] = await setupIsolatedBackend(
+const [isolatedState, { db }, { dbOps }, trackerModule, qualityProfileService, workerModule] = await setupIsolatedBackend(
   "download-tracker",
   "backend/config/db-sqlite.js",
   "backend/db/helpers/index.js",
   "backend/services/weeklyFlow/weeklyFlowDownloadTracker.js",
   "backend/services/qualityProfileService.js",
+  "backend/services/weeklyFlow/weeklyFlowWorker.js",
 );
 
 const { WeeklyFlowDownloadTracker } = trackerModule;
+const { WeeklyFlowWorker } = workerModule;
 
 test.beforeEach(async () => {
   await resetDatabase(db);
@@ -25,6 +28,7 @@ test.beforeEach(async () => {
 });
 
 test.after(async () => {
+  db.close();
   await cleanupIsolatedState(isolatedState);
 });
 
@@ -46,6 +50,76 @@ test("getNextPendingMatching skips future-dated retry jobs and returns ready wor
   );
 
   assert.equal(ready?.id, secondId);
+});
+
+test("a web-side tracker reads job changes made by the flow owner", () => {
+  const tracker = new WeeklyFlowDownloadTracker();
+  const id = tracker.addJob({ artistName: "Artist", trackName: "Song" }, "playlist");
+  const flowConnection = new Database(isolatedState.dbPath);
+  try {
+    flowConnection.prepare(
+      "UPDATE playlist_download_jobs SET status = 'done' WHERE id = ?",
+    ).run(id);
+    const previousEnv = process.env.NODE_ENV;
+    try {
+      process.env.NODE_ENV = "production";
+      assert.equal(tracker.getJob(id)?.status, "done");
+      assert.equal(tracker.getStats().done, 1);
+      assert.equal(tracker.getStatsByPlaylistType(["playlist"]).playlist.done, 1);
+      assert.deepEqual(tracker.getByPlaylistType("playlist").map((job) => job.id), [id]);
+    } finally {
+      process.env.NODE_ENV = previousEnv;
+    }
+  } finally {
+    flowConnection.close();
+  }
+});
+
+test("a web-side tracker does not reset an active flow download on import", () => {
+  const tracker = new WeeklyFlowDownloadTracker();
+  const id = tracker.addJob({ artistName: "Artist", trackName: "Song" }, "playlist");
+  tracker.setDownloading(id);
+  const previousEnv = process.env.NODE_ENV;
+  try {
+    process.env.NODE_ENV = "production";
+    const webTracker = new WeeklyFlowDownloadTracker();
+    assert.equal(webTracker.getJob(id)?.status, "downloading");
+  } finally {
+    process.env.NODE_ENV = previousEnv;
+  }
+});
+
+test("a web-side tracker preserves pending upgrades but excludes them from normal pending work", () => {
+  const tracker = new WeeklyFlowDownloadTracker();
+  const sourceId = tracker.addJob({ artistName: "Artist", trackName: "Song" }, "playlist");
+  tracker.setDone(sourceId, "/library/Song.mp3", "Album");
+  tracker.updateQuality(sourceId, { tier: "mp3-128", format: "mp3" });
+  const upgradeId = tracker.addUpgradeJob(tracker.getJob(sourceId));
+  assert.ok(upgradeId);
+  const pendingId = tracker.addJob({ artistName: "Artist", trackName: "Other" }, "playlist");
+  const previousEnv = process.env.NODE_ENV;
+  try {
+    process.env.NODE_ENV = "production";
+    const webTracker = new WeeklyFlowDownloadTracker();
+    assert.equal(webTracker.getJob(upgradeId)?.status, "pending");
+    assert.equal(tracker.getJob(upgradeId)?.status, "pending");
+    assert.deepEqual(webTracker.peekPending(10).map((job) => job.id), [pendingId]);
+  } finally {
+    process.env.NODE_ENV = previousEnv;
+  }
+});
+
+test("worker does not select a job that is already active", () => {
+  const tracker = trackerModule.downloadTracker;
+  const worker = new WeeklyFlowWorker(isolatedState.baseDir);
+  const jobId = tracker.addJob(
+    { artistName: "Artist", trackName: "Library Song" },
+    "library",
+  );
+
+  assert.equal(worker._getNextReadyPendingJob()?.id, jobId);
+  worker.activeJobs.set(jobId, { promise: Promise.resolve() });
+  assert.equal(worker._getNextReadyPendingJob(), null);
 });
 
 test("persists enriched album context for slskd matching", () => {

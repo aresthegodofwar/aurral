@@ -1,8 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { getSettingsTasks, clearSettingsStaleTasks } from "../../../utils/api/endpoints/settings.js";
+import { queryClient, queryKeys } from "../../../queryClient.js";
 import { SettingsArrFieldSet } from "./arr/SettingsArrLayout";
 
-import { AlertCircle, Check, Clock, Loader2, XCircle } from "lucide-react";
+import { AlertCircle, Check, Clock, XCircle } from "lucide-react";
+import { DotLoader } from "../../../components/DotLoader";
+import Tooltip from "../../../components/Tooltip";
 const POLL_INTERVAL_MS = 5000;
 
 const relativeFormatter = new Intl.RelativeTimeFormat(undefined, {
@@ -25,7 +29,7 @@ const STATUS_META = {
   running: {
     label: "Running",
     tone: "active",
-    icon: Loader2,
+    spinning: true,
     title: null,
   },
   queued: {
@@ -116,18 +120,20 @@ function StatusBadge({ status }) {
     icon: AlertCircle,
     title: null,
   };
-  const Icon = meta.icon;
+  const Icon = meta.icon || AlertCircle;
   return (
-    <span
-      className={`arr-task-status arr-task-status--${meta.tone}`}
-      title={meta.title || undefined}
-    >
-      <Icon
-        className={`arr-task-status__icon${status === "running" ? " animate-spin" : ""}`}
-        aria-hidden
-      />
-      {meta.label}
-    </span>
+    <Tooltip content={meta.title || undefined}>
+      <span
+        className={`arr-task-status arr-task-status--${meta.tone}`}
+      >
+        {meta.spinning ? (
+          <DotLoader size="sm" label={null} className="arr-task-status__icon" />
+        ) : (
+          <Icon className="arr-task-status__icon" aria-hidden />
+        )}
+        {meta.label}
+      </span>
+    </Tooltip>
   );
 }
 
@@ -142,14 +148,20 @@ function EmptyRows({ colSpan }) {
 function LoadingRows({ colSpan }) {
   return (
     <tr className="arr-table__empty-row">
-      <td colSpan={colSpan}>Loading task data...</td>
+      <td colSpan={colSpan}>
+        <DotLoader size="sm" label={null} /> Loading task data...
+      </td>
     </tr>
   );
 }
 
 function TasksHealthSummary({ summary, loading, clearing = false, onClearStale }) {
   if (loading || !summary) {
-    return <div className="arr-info arr-info--tasks">Loading background task status...</div>;
+    return (
+      <div className="arr-info arr-info--tasks">
+        <DotLoader size="sm" label={null} /> Loading background task status...
+      </div>
+    );
   }
 
   const { healthy, activeCount, staleCount, failedCount, workersFailedCount, completedCount } =
@@ -197,6 +209,7 @@ function TasksHealthSummary({ summary, loading, clearing = false, onClearStale }
             onClick={onClearStale}
             disabled={clearing}
           >
+            {clearing ? <DotLoader size="sm" label={null} /> : null}
             {clearing ? "Clearing stuck jobs…" : "Clear stuck jobs"}
           </button>
         </div>
@@ -213,9 +226,9 @@ function ScheduledTable({ scheduled = [], loading = false }) {
           <tr>
             <th scope="col">Name</th>
             <th scope="col">Interval</th>
-            <th scope="col">Last Execution</th>
-            <th scope="col">Last Duration</th>
-            <th scope="col">Next Execution</th>
+            <th scope="col">Last run</th>
+            <th scope="col">Duration</th>
+            <th scope="col">Next run</th>
             <th scope="col">Result</th>
           </tr>
         </thead>
@@ -281,7 +294,7 @@ function WorkersTable({ workers = [], loading = false, showAllWorkers = false })
             <th scope="col">Queued</th>
             <th scope="col">Scheduled</th>
             <th scope="col">Failed</th>
-            <th scope="col">Last Run</th>
+            <th scope="col">Last run</th>
           </tr>
         </thead>
         <tbody>
@@ -339,9 +352,11 @@ function QueueTable({ queue = [], loading = false }) {
             <th scope="col">
               {queue.some((task) => task.status === "running") ? "Running for" : "Duration"}
             </th>
-            <th scope="col" title="Retry count for jobs that can fail and re-run">
-              Attempt
-            </th>
+            <Tooltip content="Retry count for jobs that can fail and re-run">
+              <th scope="col" >
+                Attempt
+                </th>
+            </Tooltip>
           </tr>
         </thead>
         <tbody>
@@ -382,10 +397,12 @@ function QueueTable({ queue = [], loading = false }) {
                 <td>{formatRelative(task.queuedAt, "—")}</td>
                 <td>
                   {isFutureRunAt(task) ? (
-                    <span title="Runs at">
-                      <span className="arr-table__subtle">Runs at </span>
-                      {formatRelative(task.runAt, "—")}
-                    </span>
+                    <Tooltip content="Runs at">
+                      <span >
+                        <span className="arr-table__subtle">Runs at </span>
+                        {formatRelative(task.runAt, "—")}
+                      </span>
+                    </Tooltip>
                   ) : task.startedAt ? (
                     formatRelative(task.startedAt)
                   ) : (
@@ -409,39 +426,31 @@ function QueueTable({ queue = [], loading = false }) {
 }
 
 export function SettingsTasksTab({ showError, showSuccess }) {
-  const [tasks, setTasks] = useState(null);
-  const [loading, setLoading] = useState(true);
   const [clearing, setClearing] = useState(false);
-  const [loadError, setLoadError] = useState(null);
   const [showAllWorkers, setShowAllWorkers] = useState(false);
-  const refreshInFlightRef = useRef(false);
-
-  const refreshTasks = useCallback(async () => {
-    if (refreshInFlightRef.current) return;
-    refreshInFlightRef.current = true;
-    try {
-      const result = await getSettingsTasks();
-      setTasks(result);
-      setLoadError(null);
-    } catch (error) {
-      const message =
-        error.response?.data?.message ||
-        error.response?.data?.error ||
-        error.message ||
-        "Failed to load tasks";
-      setLoadError(message);
-    } finally {
-      refreshInFlightRef.current = false;
-      setLoading(false);
-    }
-  }, []);
+  const tasksQuery = useQuery({
+    queryKey: queryKeys.settingsTasks,
+    queryFn: ({ signal }) => getSettingsTasks({ signal }),
+    staleTime: 0,
+    refetchInterval: POLL_INTERVAL_MS,
+    refetchIntervalInBackground: false,
+  });
+  const tasks = tasksQuery.data;
+  const loading = tasksQuery.isPending;
+  const loadError =
+    tasksQuery.error?.response?.data?.message ||
+    tasksQuery.error?.response?.data?.error ||
+    tasksQuery.error?.message ||
+    null;
+  const clearMutation = useMutation({
+    mutationFn: clearSettingsStaleTasks,
+    onSuccess: (result) => queryClient.setQueryData(queryKeys.settingsTasks, result.tasks || null),
+  });
 
   const clearStaleJobs = useCallback(async () => {
     setClearing(true);
     try {
-      const result = await clearSettingsStaleTasks();
-      setTasks(result.tasks || null);
-      setLoadError(null);
+      const result = await clearMutation.mutateAsync();
       const cleared = Number(result.cleared || 0);
       if (cleared > 0) {
         showSuccess?.(`Cleared ${cleared} stuck job${cleared === 1 ? "" : "s"}.`);
@@ -454,26 +463,11 @@ export function SettingsTasksTab({ showError, showSuccess }) {
         error.response?.data?.error ||
         error.message ||
         "Failed to clear stuck jobs";
-      setLoadError(message);
       showError(message);
     } finally {
       setClearing(false);
     }
-  }, [showError, showSuccess]);
-
-  useEffect(() => {
-    let cancelled = false;
-    const poll = async () => {
-      if (cancelled) return;
-      await refreshTasks();
-    };
-    poll();
-    const interval = window.setInterval(poll, POLL_INTERVAL_MS);
-    return () => {
-      cancelled = true;
-      window.clearInterval(interval);
-    };
-  }, [refreshTasks]);
+  }, [clearMutation, showError, showSuccess]);
 
   const idleWorkerCount = useMemo(() => {
     const workerRows = tasks?.workers || [];

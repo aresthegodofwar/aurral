@@ -69,9 +69,11 @@ export default defineConfig({
             { slug: "integrations/koito" },
             { slug: "integrations/slskd" },
             { slug: "integrations/ytdlp" },
+            { slug: "integrations/deemix" },
             { slug: "integrations/usenet" },
             { slug: "integrations/navidrome" },
             { slug: "integrations/plex" },
+            { slug: "integrations/jellyfin" },
             { slug: "integrations/ticketmaster" },
             { slug: "integrations/metadata" },
             { slug: "integrations/notifications" },
@@ -93,6 +95,14 @@ export default defineConfig({
           items: [
             { slug: "api/overview" },
             { slug: "api/endpoints" },
+          ],
+        },
+        {
+          label: "Development",
+          collapsed: true,
+          items: [
+            { slug: "development/track-matching" },
+            { slug: "development/ui-design-system" },
           ],
         },
         { label: "Sponsorship", slug: "sponsorship" },

@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import { dbOps } from "../../../db/helpers/index.js";
 import {
   DATE_TIME_FORMATS,
@@ -12,13 +13,11 @@ import { resolvePlaylistRoot } from "../../../services/playlistPaths.js";
 import {
   resolveYtdlpStagingRoot,
   validateDownloadFolderPath,
+  computeLibraryRootOverlaps,
 } from "../../../services/downloadFolderConfig.js";
 import { normalizePathMappings } from "../../../services/pathMappings.js";
-import {
-  normalizeM3uPathMappings,
-  normalizeM3uPathMode,
-} from "../../../services/playlistM3uPaths.js";
 import { logger } from "../../../services/logger.js";
+import { normalizeLidarrApiKey, normalizeLidarrUrl } from "../../../services/lidarrClient.js";
 import { testNavidromeConnection } from "../../shared/navidromeTest.js";
 import { mergePlexIntegration } from "./plexSettings.js";
 import { getNewsSettings, normalizeNewsFeeds, normalizeNewsGroups } from "../../../services/apiClients/config.js";
@@ -32,6 +31,35 @@ function mergeIntegrations(existing, input, keys) {
       : existing[key];
   }
   return merged;
+}
+
+function resolveLibraryRootWarnings(settings) {
+  const aurralRoot = settings?.downloadFolderPath || resolvePlaylistRoot();
+  const configuredLidarr = settings?.integrations?.lidarr || {};
+  const lidarrRoots =
+    configuredLidarr.enabled === false
+      ? []
+      : [
+          ...(Array.isArray(configuredLidarr.rootFolderPaths)
+            ? configuredLidarr.rootFolderPaths
+            : []),
+          configuredLidarr.rootFolderPath,
+        ];
+  return computeLibraryRootOverlaps({ aurralRoot, lidarrRoots });
+}
+
+function didLidarrRootDiscoveryChange(previousSettings, nextSettings) {
+  const previous = previousSettings?.integrations?.lidarr || {};
+  const next = nextSettings?.integrations?.lidarr || {};
+  return ["url", "apiKey", "enabled", "insecure", "rootFolderPath", "rootFolderPaths"]
+    .some((key) => JSON.stringify(previous[key]) !== JSON.stringify(next[key]));
+}
+
+function didLidarrConnectionChange(previousSettings, nextSettings) {
+  const previous = previousSettings?.integrations?.lidarr || {};
+  const next = nextSettings?.integrations?.lidarr || {};
+  return normalizeLidarrUrl(previous.url) !== normalizeLidarrUrl(next.url) ||
+    normalizeLidarrApiKey(previous.apiKey) !== normalizeLidarrApiKey(next.apiKey);
 }
 
 export function registerGeneral(router) {
@@ -69,8 +97,15 @@ export function registerGeneral(router) {
           enabled: settings?.security?.localNetworkBypass?.enabled === true,
         },
       };
+      if (settings.integrations?.lidarr) {
+        settings.integrations.lidarr = {
+          ...settings.integrations.lidarr,
+          enabled: settings.integrations.lidarr.enabled !== false,
+        };
+      }
       res.json({
         ...settings,
+        rootWarnings: resolveLibraryRootWarnings(settings),
         downloadFolderPath:
           settings.downloadFolderPath || resolvePlaylistRoot(),
         integrations: {
@@ -96,6 +131,7 @@ export function registerGeneral(router) {
       const {
         quality,
         qualityProfile,
+        subsonic,
         releaseTypes,
         integrations,
         rootFolderPath,
@@ -148,6 +184,12 @@ export function registerGeneral(router) {
         nextMetadata.enableNarrowFallbacks =
           nextMetadata.enableNarrowFallbacks !== false;
         integrations.metadata = nextMetadata;
+      }
+      if (integrations?.lidarr?.enabled !== undefined) {
+        integrations.lidarr = {
+          ...integrations.lidarr,
+          enabled: integrations.lidarr.enabled === true,
+        };
       }
       if (integrations?.coverArtArchive) {
         delete integrations.coverArtArchive;
@@ -255,11 +297,85 @@ export function registerGeneral(router) {
         integrations.nzbget = nextNzbget;
       }
       if (integrations?.slskd) {
-        const priority = Number.parseInt(integrations.slskd.priority, 10);
-        integrations.slskd.enabled = integrations.slskd.enabled === true;
-        integrations.slskd.priority = Number.isFinite(priority)
+        const nextSlskd = {
+          ...(currentSettings.integrations?.slskd || {}),
+          ...integrations.slskd,
+        };
+        const trimmedUrl = String(nextSlskd.url || "").trim();
+        if (trimmedUrl) {
+          const urlValidation = validateExternalUrl(trimmedUrl);
+          if (!urlValidation.valid) {
+            return res.status(400).json({
+              error: `Invalid slskd URL: ${urlValidation.error}`,
+            });
+          }
+          nextSlskd.url = urlValidation.url.replace(/\/+$/, "");
+        } else {
+          nextSlskd.url = "";
+        }
+        nextSlskd.apiKey =
+          typeof nextSlskd.apiKey === "string" ? nextSlskd.apiKey.trim() : "";
+        nextSlskd.enabled = nextSlskd.enabled === true;
+        const priority = Number.parseInt(nextSlskd.priority, 10);
+        nextSlskd.priority = Number.isFinite(priority)
           ? Math.min(1000, Math.max(1, priority))
           : 10;
+        nextSlskd.cleanupAfterRuns = nextSlskd.cleanupAfterRuns === true;
+        integrations.slskd = nextSlskd;
+      }
+      if (integrations?.sabnzbd) {
+        const nextSabnzbd = {
+          ...(currentSettings.integrations?.sabnzbd || {}),
+          ...integrations.sabnzbd,
+        };
+        const trimmedUrl = String(nextSabnzbd.url || "").trim();
+        if (trimmedUrl) {
+          const urlValidation = validateExternalUrl(trimmedUrl);
+          if (!urlValidation.valid) {
+            return res.status(400).json({
+              error: `Invalid SABnzbd URL: ${urlValidation.error}`,
+            });
+          }
+          nextSabnzbd.url = urlValidation.url.replace(/\/+$/, "");
+        } else {
+          nextSabnzbd.url = "";
+        }
+        nextSabnzbd.apiKey =
+          typeof nextSabnzbd.apiKey === "string" ? nextSabnzbd.apiKey.trim() : "";
+        nextSabnzbd.enabled = nextSabnzbd.enabled === true;
+        nextSabnzbd.category = String(nextSabnzbd.category || "aurral").trim() || "aurral";
+        const priority = Number.parseInt(nextSabnzbd.priority, 10);
+        nextSabnzbd.priority = Number.isFinite(priority)
+          ? Math.min(1000, Math.max(1, priority))
+          : 20;
+        nextSabnzbd.addPaused = nextSabnzbd.addPaused === true;
+        integrations.sabnzbd = nextSabnzbd;
+      }
+      if (integrations?.deemix) {
+        const nextDeemix = {
+          ...(currentSettings.integrations?.deemix || {}),
+          ...integrations.deemix,
+        };
+        const trimmedUrl = String(nextDeemix.url || "").trim();
+        if (trimmedUrl) {
+          const urlValidation = validateExternalUrl(trimmedUrl);
+          if (!urlValidation.valid) {
+            return res.status(400).json({
+              error: `Invalid deemix URL: ${urlValidation.error}`,
+            });
+          }
+          nextDeemix.url = urlValidation.url.replace(/\/+$/, "");
+        } else {
+          nextDeemix.url = "";
+        }
+        nextDeemix.enabled = nextDeemix.enabled === true;
+        const bitrate = Number.parseInt(nextDeemix.bitrate, 10);
+        nextDeemix.bitrate = [1, 3, 9].includes(bitrate) ? bitrate : 9;
+        const priority = Number.parseInt(nextDeemix.priority, 10);
+        nextDeemix.priority = Number.isFinite(priority)
+          ? Math.min(1000, Math.max(1, priority))
+          : 15;
+        integrations.deemix = nextDeemix;
       }
       if (integrations?.ytdlp) {
         const nextYtdlp = {
@@ -284,14 +400,6 @@ export function registerGeneral(router) {
         delete nextYtdlp.binaryPath;
         delete nextYtdlp.audioFormat;
         integrations.ytdlp = nextYtdlp;
-      }
-      if (integrations?.navidrome) {
-        integrations.navidrome.m3uPathMode = normalizeM3uPathMode(
-          integrations.navidrome.m3uPathMode,
-        );
-        integrations.navidrome.pathMappings = normalizeM3uPathMappings(
-          integrations.navidrome.pathMappings,
-        );
       }
       if (integrations?.news) {
         const nextNews = {
@@ -319,7 +427,7 @@ export function registerGeneral(router) {
         }
       }
 
-      const INTEGRATION_KEYS = ["lidarr", "navidrome", "slskd", "prowlarr", "nzbget", "ytdlp", "lastfm", "ticketmaster", "news", "metadata", "general", "gotify", "webhookEvents", "google"];
+      const INTEGRATION_KEYS = ["lidarr", "navidrome", "jellyfin", "slskd", "prowlarr", "nzbget", "sabnzbd", "ytdlp", "deemix", "lastfm", "ticketmaster", "news", "metadata", "general", "gotify", "webhookEvents", "google"];
       let mergedIntegrations =
         currentSettings.integrations || defaultData.settings.integrations || {};
       if (integrations) {
@@ -348,6 +456,10 @@ export function registerGeneral(router) {
       if (mergedIntegrations?.coverArtArchive) {
         delete mergedIntegrations.coverArtArchive;
       }
+      const normalizedSubsonic =
+        subsonic && typeof subsonic === "object" && !Array.isArray(subsonic)
+          ? subsonic
+          : null;
       const updatedSettings = {
         ...currentSettings,
         dateTimeFormat:
@@ -365,6 +477,18 @@ export function registerGeneral(router) {
                 integrations?.slskd,
               )
             : currentSettings.qualityProfile,
+        subsonic:
+          normalizedSubsonic !== null
+            ? {
+                ...(currentSettings.subsonic || defaultData.settings.subsonic),
+                ...normalizedSubsonic,
+                favoriteAutoKeep:
+                  normalizedSubsonic.favoriteAutoKeep !== undefined
+                    ? normalizedSubsonic.favoriteAutoKeep !== false
+                    : (currentSettings.subsonic || defaultData.settings.subsonic)
+                        .favoriteAutoKeep !== false,
+              }
+            : currentSettings.subsonic || defaultData.settings.subsonic,
         rootFolderPath:
           rootFolderPath !== undefined
             ? rootFolderPath
@@ -431,7 +555,43 @@ export function registerGeneral(router) {
         delete updatedSettings.integrations.musicbrainz;
       }
 
+      if (didLidarrConnectionChange(currentSettings, updatedSettings)) {
+        updatedSettings.integrations = {
+          ...updatedSettings.integrations,
+          lidarr: {
+            ...(updatedSettings.integrations?.lidarr || {}),
+            rootFolderPath: null,
+            rootFolderPaths: [],
+          },
+        };
+      }
+
       dbOps.updateSettings(updatedSettings);
+      const { lidarrClient } = await import("../../../services/lidarrClient.js");
+      lidarrClient.updateConfig();
+      if (didLidarrRootDiscoveryChange(currentSettings, updatedSettings) && lidarrClient.isConfigured()) {
+        try {
+          await lidarrClient.getRootFolders({ forceRefresh: true });
+        } catch (error) {
+          logger.warn("settings", "Failed to refresh Lidarr root folders:", {
+            message: error.message,
+          });
+        }
+      }
+      const { downloadClientRegistry } = await import(
+        "../../../services/download/downloadClientSettings.js"
+      );
+      downloadClientRegistry.updateConfig(updatedSettings.integrations);
+      try {
+        const { refreshLibraryFileWatcher } = await import(
+          "../../../services/libraryFileWatcher.js"
+        );
+        await refreshLibraryFileWatcher();
+      } catch (error) {
+        logger.warn("settings", "Failed to refresh library file watcher:", {
+          message: error.message,
+        });
+      }
       if (
         qualityProfile !== undefined &&
         JSON.stringify(updatedSettings.qualityProfile) !==
@@ -445,13 +605,30 @@ export function registerGeneral(router) {
           { priority: -10 },
         );
       }
-      if (integrations?.navidrome) {
+      const playbackSettingsChanged = ["navidrome", "jellyfin"].some((key) =>
+        !isDeepStrictEqual(
+          currentSettings.integrations?.[key],
+          updatedSettings.integrations?.[key],
+        ));
+      if (playbackSettingsChanged) {
         const { playlistManager } = await import(
           "../../../services/weeklyFlow/weeklyFlowPlaylistManager.js"
         );
         playlistManager.updateConfig(false);
-        await playlistManager.ensureSmartPlaylists();
-        playlistManager.scheduleScanLibrary(true);
+        // Library enumeration can take minutes. Saving settings must not wait
+        // for it, but the scan still needs to follow playlist initialization.
+        playlistManager.ensureSmartPlaylists()
+          .catch((error) => {
+            logger.warn("settings", "Failed to initialize playback playlists:", {
+              message: error.message,
+            });
+          })
+          .then(() => playlistManager.scheduleScanLibrary(true))
+          .catch((error) => {
+            logger.warn("settings", "Failed to schedule playback library scan:", {
+              message: error.message,
+            });
+          });
       }
       const reconciled = reconcileLocalNetworkBypassSetting().settings;
       if (
@@ -460,7 +637,10 @@ export function registerGeneral(router) {
       ) {
         websocketService.reconcileAuthState();
       }
-      res.json(reconciled);
+      res.json({
+        ...reconciled,
+        rootWarnings: resolveLibraryRootWarnings(updatedSettings),
+      });
     } catch (error) {
       logger.error("settings", "Settings POST error:", error);
       res

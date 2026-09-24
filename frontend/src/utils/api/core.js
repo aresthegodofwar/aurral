@@ -99,8 +99,17 @@ async function request(config) {
       const error = new Error(`Request failed with status code ${res.status}`);
       error.response = response;
       if (res.status === 401 && !isAuthEndpoint) {
-        clearAuthStorage();
-        if (!data?.error) reauthenticateThroughProxy();
+        const isAurralAuthError =
+          data?.error === "Unauthorized" ||
+          data?.code === "AUTH_REQUIRED" ||
+          data?.code === "SESSION_INVALID";
+        if (isAurralAuthError) {
+          clearAuthStorage();
+        } else if (data?.error && typeof data.error === "object") {
+          reauthenticateThroughProxy();
+        } else if (!data?.error) {
+          reauthenticateThroughProxy();
+        }
       }
       throw error;
     }
@@ -154,31 +163,16 @@ export const clearAuthStorage = () => {
   globalThis?.localStorage?.removeItem(AUTH_TOKEN_KEY);
 };
 
-export const libraryLookupCache = new Map();
-const MAX_LIBRARY_LOOKUP_CACHE_SIZE = 1000;
 export const coverResponseCache = new Map();
 export const coverInflightRequests = new Map();
 const MAX_COVER_CACHE_SIZE = 1000;
 const COVER_CACHE_TTL_MS = 30 * 60 * 1000;
 const EMPTY_COVER_CACHE_TTL_MS = 60 * 1000;
-export const searchInflightRequests = new Map();
-export const bootstrapInflight = new Map();
-export const flowStatusInflight = new Map();
-
-export const setLibraryLookupCacheEntry = (id, value) => {
-  if (id == null) return;
-  if (libraryLookupCache.has(id)) libraryLookupCache.delete(id);
-  libraryLookupCache.set(id, value);
-  if (libraryLookupCache.size > MAX_LIBRARY_LOOKUP_CACHE_SIZE) {
-    const oldestKey = libraryLookupCache.keys().next().value;
-    if (oldestKey !== undefined) libraryLookupCache.delete(oldestKey);
-  }
-};
-
 export const setCoverCacheEntry = (key, value) => {
   if (!key) return;
   const images = Array.isArray(value?.images) ? value.images : [];
-  const ttlMs = images.length > 0 ? COVER_CACHE_TTL_MS : EMPTY_COVER_CACHE_TTL_MS;
+  const hasArtwork = images.length > 0 || Boolean(value?.image || value?.imageUrl || value?.coverUrl);
+  const ttlMs = hasArtwork ? COVER_CACHE_TTL_MS : EMPTY_COVER_CACHE_TTL_MS;
   if (coverResponseCache.has(key)) coverResponseCache.delete(key);
   coverResponseCache.set(key, { value, expiresAt: Date.now() + ttlMs });
   if (coverResponseCache.size > MAX_COVER_CACHE_SIZE) {
@@ -205,11 +199,18 @@ export const fetchInflightOnce = async (store, key, requestFactory) => {
 };
 
 export const fetchCoverWithMemo = async (key, requestFactory, { bypassCache = false } = {}) => {
+  const refreshKey = `${key}:refresh`;
   if (!bypassCache) {
+    const refresh = coverInflightRequests.get(refreshKey);
+    if (refresh) return refresh;
     const cached = getCoverCacheEntry(key);
     if (cached) return cached;
+  } else {
+    const normal = coverInflightRequests.get(key);
+    if (normal) await normal.catch(() => undefined);
   }
-  return fetchInflightOnce(coverInflightRequests, key, () =>
+
+  return fetchInflightOnce(coverInflightRequests, bypassCache ? refreshKey : key, () =>
     requestFactory().then((response) => {
       setCoverCacheEntry(key, response);
       return response;

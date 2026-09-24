@@ -1,9 +1,11 @@
-import { useState, useRef } from "react";
-import { testGotifyConnection } from "../../../utils/api/endpoints/settings.js";
+import { useEffect, useState, useRef } from "react";
+import {
+  testGotifyConnection,
+  testWebhookConnection,
+} from "../../../utils/api/endpoints/settings.js";
 import { getAppBasePath } from "../../../utils/basePath.js";
 
 import { Plus, Trash2, GripVertical } from "lucide-react";
-import { Link } from "react-router-dom";
 import { SettingsInput, SettingsTextarea } from "./SettingsField";
 import { IntegrationCard, SettingsIntegrationModal } from "./SettingsIntegrationCards";
 import {
@@ -20,7 +22,11 @@ import {
   SettingsModalToggleGroup,
 } from "./SettingsModalLayout";
 import PillToggle from "../../../components/PillToggle";
+import { DotLoader } from "../../../components/DotLoader";
 import { getConfiguredStatus } from "../utils/integrationStatus";
+
+const EMPTY_WEBHOOKS = Object.freeze([]);
+
 export function SettingsConnectTab({
   settings,
   updateSettings,
@@ -32,6 +38,9 @@ export function SettingsConnectTab({
   showError,
 }) {
   const [activeModal, setActiveModal] = useState(null);
+  const [testStatus, setTestStatus] = useState(null);
+  const [testingWebhookIndex, setTestingWebhookIndex] = useState(null);
+  const [webhookTestStatus, setWebhookTestStatus] = useState(null);
   const gotify = settings.integrations?.gotify || {};
   const lastfm = settings.integrations?.lastfm || {};
   const ticketmaster = settings.integrations?.ticketmaster || {};
@@ -44,10 +53,17 @@ export function SettingsConnectTab({
     google.enabled && google.clientId && google.clientSecret && google.redirectUri,
   );
 
-  const webhooks = settings.integrations?.webhooks || [];
+  const configuredWebhooks = settings.integrations?.webhooks;
+  const webhooks = configuredWebhooks || EMPTY_WEBHOOKS;
   const webhookEvents = settings.integrations?.webhookEvents || {};
+  const webhookRevisionRef = useRef(0);
+
+  useEffect(() => {
+    webhookRevisionRef.current += 1;
+  }, [configuredWebhooks]);
 
   const updateWebhooks = (newWebhooks) => {
+    webhookRevisionRef.current += 1;
     updateSettings({
       ...settings,
       integrations: {
@@ -67,7 +83,8 @@ export function SettingsConnectTab({
     });
   };
 
-  const updateGotify = (patch) =>
+  const updateGotify = (patch) => {
+    setTestStatus(null);
     updateSettings({
       ...settings,
       integrations: {
@@ -75,6 +92,7 @@ export function SettingsConnectTab({
         gotify: { ...gotify, ...patch },
       },
     });
+  };
 
   const updateLastfm = (patch) =>
     updateSettings({
@@ -112,35 +130,44 @@ export function SettingsConnectTab({
   const [dragIdx, setDragIdx] = useState(null);
   const allowDragRef = useRef(null);
 
+  useEffect(() => {
+    setTestStatus(null);
+  }, [activeModal]);
+
   const handleTestGotify = async () => {
+    setTestStatus(null);
     const url = gotify.url;
     const token = gotify.token;
     if (!url || !token) {
-      showError("Enter Gotify URL and token first");
+      setTestStatus({ tone: "error", message: "Enter the Gotify URL and token." });
+      showError("Enter the Gotify URL and token first");
       return;
     }
     setTestingGotify(true);
     try {
       await testGotifyConnection(url, token);
+      setTestStatus({ tone: "success", message: "Test notification sent." });
       showSuccess("Test notification sent.");
     } catch (err) {
+      setTestStatus({ tone: "error", message: "Test failed. Check the URL and token, then retry." });
       const msg = err.response?.data?.message || err.response?.data?.error || err.message;
       showError(`Gotify test failed: ${msg}`);
     } finally {
       setTestingGotify(false);
     }
   };
-
   const addWebhook = () => {
     if (webhooks.length >= 5) return;
     updateWebhooks([...webhooks, { url: "", body: null, headers: [] }]);
   };
 
   const removeWebhook = (index) => {
+    setWebhookTestStatus(null);
     updateWebhooks(webhooks.filter((_, i) => i !== index));
   };
 
   const moveWebhook = (from, to) => {
+    setWebhookTestStatus(null);
     const next = [...webhooks];
     const [moved] = next.splice(from, 1);
     next.splice(to, 0, moved);
@@ -148,7 +175,43 @@ export function SettingsConnectTab({
   };
 
   const updateWebhook = (index, patch) => {
+    setWebhookTestStatus(null);
     updateWebhooks(webhooks.map((wh, i) => (i === index ? { ...wh, ...patch } : wh)));
+  };
+
+  const handleTestWebhook = async (index) => {
+    const webhook = webhooks[index];
+    const url = String(webhook?.url || "").trim();
+    if (!url) return;
+
+    setWebhookTestStatus(null);
+    setTestingWebhookIndex(index);
+    const testRevision = webhookRevisionRef.current;
+    try {
+      await testWebhookConnection({
+        ...webhook,
+        url,
+      });
+      if (webhookRevisionRef.current !== testRevision) return;
+      setWebhookTestStatus({
+        index,
+        tone: "success",
+        message: "Test webhook sent.",
+      });
+      showSuccess("Test webhook sent.");
+    } catch (err) {
+      if (webhookRevisionRef.current !== testRevision) return;
+      const message =
+        err.response?.data?.message || err.response?.data?.error || err.message;
+      setWebhookTestStatus({
+        index,
+        tone: "error",
+        message: "Test failed. Check the URL, body, and headers, then retry.",
+      });
+      showError(`Webhook test failed: ${message}`);
+    } finally {
+      setTestingWebhookIndex(null);
+    }
   };
 
   const addHeader = (whIndex) => {
@@ -193,9 +256,6 @@ export function SettingsConnectTab({
     <div className="arr-page">
       <form onSubmit={handleSave} className="arr-form" autoComplete="off">
         <SettingsArrFieldSet legend="Connections">
-          <div className="arr-info">
-            External services Aurral integrates with for notifications and discovery data.
-          </div>
           <SettingsArrCardGrid>
             <IntegrationCard
               title="Gotify"
@@ -206,9 +266,15 @@ export function SettingsConnectTab({
             />
             <IntegrationCard
               title="Last.fm"
-              subtitle="Listening history API"
+              subtitle="Recommendations and scrobbling"
               status={getConfiguredStatus(lastfmConfigured)}
-              meta={lastfm.username || "Admin default"}
+              meta={
+                lastfm.apiKey && lastfm.apiSecret
+                  ? "API key and secret configured"
+                  : lastfm.apiKey
+                    ? "API secret required for scrobbling"
+                    : "API key required"
+              }
               onClick={() => setActiveModal("lastfm")}
             />
             <IntegrationCard
@@ -230,6 +296,7 @@ export function SettingsConnectTab({
 
         <SettingsArrFieldSet
           legend="Webhooks"
+          className="settings-connect-webhooks"
           actions={
             <button
               type="button"
@@ -285,15 +352,34 @@ export function SettingsConnectTab({
                   />
                   <span>Webhook #{index + 1}</span>
                 </div>
-                <button
-                  type="button"
-                  className="arr-btn arr-btn--ghost arr-btn--icon"
-                  onClick={() => removeWebhook(index)}
-                  aria-label="Remove webhook"
-                >
-                  <Trash2 className="artist-icon-sm" aria-hidden />
-                </button>
+                <div className="arr-webhook-card__actions">
+                  <button
+                    type="button"
+                    className="arr-btn"
+                    onClick={() => handleTestWebhook(index)}
+                    disabled={testingWebhookIndex !== null || !String(wh.url || "").trim()}
+                  >
+                    {testingWebhookIndex === index ? <DotLoader size="sm" label={null} /> : null}
+                    {testingWebhookIndex === index ? "Testing..." : "Test webhook"}
+                  </button>
+                  <button
+                    type="button"
+                    className="arr-btn arr-btn--ghost arr-btn--icon"
+                    onClick={() => removeWebhook(index)}
+                    aria-label="Remove webhook"
+                  >
+                    <Trash2 className="artist-icon-sm" aria-hidden />
+                  </button>
+                </div>
               </div>
+              {webhookTestStatus?.index === index ? (
+                <p
+                  className={`arr-webhook-card__test-status arr-webhook-card__test-status--${webhookTestStatus.tone}`}
+                  role={webhookTestStatus.tone === "error" ? "alert" : "status"}
+                >
+                  {webhookTestStatus.message}
+                </p>
+              ) : null}
 
               <SettingsArrFormGroup label="URL" labelFor={`webhook-url-${index}`} size="large">
                 <SettingsInput
@@ -397,7 +483,7 @@ export function SettingsConnectTab({
           ))}
         </SettingsArrFieldSet>
 
-        <SettingsArrFieldSet legend="Notification Events">
+        <SettingsArrFieldSet legend="Notification events">
           <SettingsArrFormGroup label="Discover updated">
             <PillToggle
               checked={webhookEvents.notifyDiscoveryUpdated || false}
@@ -445,10 +531,7 @@ export function SettingsConnectTab({
         </SettingsArrFieldSet>
 
         <SettingsArrFieldSet legend="Inbox">
-          <div className="arr-info">
-            Choose which library-based updates appear in the inbox dropdown.
-          </div>
-          <SettingsArrFormGroup label="Enable Inbox" labelFor="inbox-enabled">
+          <SettingsArrFormGroup label="Enable inbox" labelFor="inbox-enabled">
             <PillToggle
               id="inbox-enabled"
               checked={inbox.enabled !== false}
@@ -474,7 +557,7 @@ export function SettingsConnectTab({
               onChange={(e) => updateInbox({ shows: e.target.checked })}
             />
           </SettingsArrFormGroup>
-          <SettingsArrFormGroup label="Library Artist news" labelFor="inbox-news">
+          <SettingsArrFormGroup label="Library artist news" labelFor="inbox-news">
             <PillToggle
               id="inbox-news"
               checked={inbox.news !== false}
@@ -482,7 +565,7 @@ export function SettingsConnectTab({
               onChange={(e) => updateInbox({ news: e.target.checked })}
             />
           </SettingsArrFormGroup>
-          <SettingsArrFormGroup label="Recommended Artist news" labelFor="inbox-recommended-news">
+          <SettingsArrFormGroup label="Recommended artist news" labelFor="inbox-recommended-news">
             <PillToggle
               id="inbox-recommended-news"
               checked={inbox.recommendedNews === true}
@@ -507,6 +590,7 @@ export function SettingsConnectTab({
         <SettingsIntegrationModal
           title="Gotify"
           onClose={() => setActiveModal(null)}
+          testStatus={testStatus}
           footerActions={
             <button
               type="button"
@@ -514,6 +598,7 @@ export function SettingsConnectTab({
               disabled={testingGotify || !gotify.url || !gotify.token}
               className="btn btn-secondary"
             >
+              {testingGotify ? <DotLoader size="sm" label={null} /> : null}
               {testingGotify ? "Sending..." : "Test notification"}
             </button>
           }
@@ -568,13 +653,10 @@ export function SettingsConnectTab({
       {activeModal === "lastfm" && (
         <SettingsIntegrationModal title="Last.fm" onClose={() => setActiveModal(null)}>
           <SettingsModalIntro>
-            Admin default API key and username. Users can override listening history in{" "}
-            <Link to="/profile" className="settings-page__link">
-              Profile
-            </Link>
-            .
+            Aurral uses the API key for recommendations and discovery data. The API secret is also
+            required to connect a Last.fm account for scrobbling in Playback.
           </SettingsModalIntro>
-          <SettingsModalSection title="Credentials">
+          <SettingsModalSection title="API">
             <SettingsModalField label="API key">
               <SettingsInput
                 type="password"
@@ -584,13 +666,13 @@ export function SettingsConnectTab({
                 onChange={(e) => updateLastfm({ apiKey: e.target.value })}
               />
             </SettingsModalField>
-            <SettingsModalField label="Default username">
+            <SettingsModalField label="API secret">
               <SettingsInput
-                type="text"
-                placeholder="Your Last.fm username"
+                type="password"
+                placeholder="Last.fm API secret"
                 autoComplete="off"
-                value={lastfm.username || ""}
-                onChange={(e) => updateLastfm({ username: e.target.value })}
+                value={lastfm.apiSecret || ""}
+                onChange={(e) => updateLastfm({ apiSecret: e.target.value })}
               />
             </SettingsModalField>
           </SettingsModalSection>

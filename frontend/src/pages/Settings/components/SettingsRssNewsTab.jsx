@@ -4,21 +4,22 @@ import PillToggle from "../../../components/PillToggle";
 import { SettingsInput } from "./SettingsField";
 import { SettingsArrFieldSet, SettingsArrFormGroup } from "./arr/SettingsArrLayout";
 import { SettingsIntegrationModal } from "./SettingsIntegrationCards";
+import Tooltip from "../../../components/Tooltip";
 
 const GROUPS = [
-  ["major", "Major Music Publications & Magazines"],
-  ["indie", "Indie & Alternative Music Blogs"],
-  ["discovery", "Music Discovery & Curation"],
-  ["hiphop", "Hip-Hop & Rap"],
-  ["pop", "Pop & Mainstream"],
-  ["electronic", "Electronic & Dance Music"],
-  ["metal", "Metal & Hard Rock"],
+  ["major", "Major music publications & magazines"],
+  ["indie", "Indie & alternative music blogs"],
+  ["discovery", "Music discovery & curation"],
+  ["hiphop", "Hip-hop & rap"],
+  ["pop", "Pop & mainstream"],
+  ["electronic", "Electronic & dance music"],
+  ["metal", "Metal & hard rock"],
   ["country", "Country & Americana"],
   ["jazz", "Jazz"],
-  ["classical", "Classical & Contemporary Classical"],
-  ["specialty", "Genre Specialty"],
-  ["regional", "Regional Music Scenes"],
-  ["concerts", "Concerts, Festivals & Live Music"],
+  ["classical", "Classical & contemporary classical"],
+  ["specialty", "Genre specialty"],
+  ["regional", "Regional music scenes"],
+  ["concerts", "Concerts, festivals & live music"],
 ];
 
 export function SettingsRssNewsTab({ settings, updateSettings, handleSaveSettings }) {
@@ -92,12 +93,16 @@ export function SettingsRssNewsTab({ settings, updateSettings, handleSaveSetting
         <PillToggle checked={feed.enabled !== false} onChange={(event) => updateFeed(index, { enabled: event.target.checked })} aria-label={`Enable ${feed.name || "RSS feed"}`} />
         {!feed.builtIn ? (
           <>
-            <button type="button" className="arr-btn arr-btn--ghost arr-btn--icon" onClick={() => editFeed(index)} aria-label={`Edit ${feed.name}`} title={`Edit ${feed.name}`}>
-              <Pencil className="artist-icon-xs" aria-hidden />
-            </button>
-            <button type="button" className="arr-btn arr-btn--danger arr-btn--icon" onClick={() => removeFeed(index)} aria-label={`Delete ${feed.name}`} title={`Delete ${feed.name}`}>
-              <Trash2 className="artist-icon-xs" aria-hidden />
-            </button>
+            <Tooltip content={`Edit ${feed.name}`}>
+              <button type="button" className="arr-btn arr-btn--ghost arr-btn--icon" onClick={() => editFeed(index)} aria-label={`Edit ${feed.name}`} >
+                <Pencil className="artist-icon-xs" aria-hidden />
+              </button>
+            </Tooltip>
+            <Tooltip content={`Delete ${feed.name}`}>
+              <button type="button" className="arr-btn arr-btn--danger arr-btn--icon" onClick={() => removeFeed(index)} aria-label={`Delete ${feed.name}`} >
+                <Trash2 className="artist-icon-xs" aria-hidden />
+              </button>
+            </Tooltip>
           </>
         ) : null}
       </div>
@@ -107,8 +112,8 @@ export function SettingsRssNewsTab({ settings, updateSettings, handleSaveSetting
   return (
     <div className="arr-page">
       <form onSubmit={handleSaveSettings} className="arr-form" autoComplete="off">
-        <SettingsArrFieldSet legend="RSS News">
-          <SettingsArrFormGroup label="Enable RSS News" labelFor="enable-rss-news">
+        <SettingsArrFieldSet legend="RSS news">
+          <SettingsArrFormGroup label="Enable RSS news" labelFor="enable-rss-news">
             <PillToggle id="enable-rss-news" checked={news.enabled !== false} onChange={(event) => updateNews({ enabled: event.target.checked })} />
           </SettingsArrFormGroup>
         </SettingsArrFieldSet>
@@ -122,7 +127,11 @@ export function SettingsRssNewsTab({ settings, updateSettings, handleSaveSetting
           }
         >
           <div className="settings-news-feeds settings-news-feeds--page">
-            {feeds.map((feed, index) => feed.group === "custom" ? renderFeed(feed, index) : null)}
+            {feeds.some((feed) => feed.group === "custom") ? (
+              feeds.map((feed, index) => feed.group === "custom" ? renderFeed(feed, index) : null)
+            ) : (
+              <p className="arr-form-help">No custom feeds yet.</p>
+            )}
           </div>
         </SettingsArrFieldSet>
 
@@ -154,9 +163,7 @@ export function SettingsRssNewsTab({ settings, updateSettings, handleSaveSetting
         <SettingsIntegrationModal
           title={feedEditor.index === null ? "Add RSS feed" : "Edit RSS feed"}
           onClose={() => setFeedEditor(null)}
-          saveReminder={false}
-          showDone={false}
-          footerActions={<button type="button" className="arr-btn arr-btn--primary arr-btn--icon" onClick={saveFeed} aria-label="Save feed" title="Save feed"><Save className="artist-icon-sm" aria-hidden /></button>}
+          footerActions={<Tooltip content="Save feed"><button type="button" className="arr-btn arr-btn--primary arr-btn--icon" onClick={saveFeed} aria-label="Save feed" ><Save className="artist-icon-sm" aria-hidden /></button></Tooltip>}
         >
           <div className="settings-modal__section-body">
             <label className="settings-modal__label" htmlFor="rss-feed-editor-name">Feed name</label>

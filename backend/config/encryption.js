@@ -40,6 +40,7 @@ export function decryptWithKey(text, key) {
 const SENSITIVE_PATHS = [
   ["navidrome", "password"],
   ["plex", "token"],
+  ["jellyfin", "apiKey"],
   ["general", "authPassword"],
   ["lidarr", "apiKey"],
   ["slskd", "apiKey"],
@@ -48,6 +49,7 @@ const SENSITIVE_PATHS = [
   ["gotify", "token"],
   ["lastfm", "apiKey"],
   ["google", "clientSecret"],
+  ["lastfm", "apiSecret"],
 ];
 
 function getAt(obj, path) {

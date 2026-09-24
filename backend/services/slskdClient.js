@@ -12,20 +12,72 @@ const DEFAULT_RESPONSE_LIMIT = 150;
 const DEFAULT_MAX_PEER_QUEUE = 150;
 const DEFAULT_MIN_PEER_SPEED = 51200;
 
+export const slskdSettings = Object.freeze({
+  key: "slskd",
+  label: "slskd",
+  subtitle: "Soulseek",
+  enabledDefault: false,
+  testRequiresEnabled: false,
+  fields: Object.freeze([
+    Object.freeze({ key: "enabled", label: "Enable slskd", type: "toggle" }),
+    Object.freeze({
+      key: "url",
+      label: "Server URL",
+      type: "url",
+      required: true,
+      section: "Connection",
+      placeholder: "http://localhost:5030",
+    }),
+    Object.freeze({
+      key: "apiKey",
+      label: "API key",
+      type: "password",
+      secret: true,
+      section: "Connection",
+      hint: "Optional - leave empty when slskd authentication is disabled (for example behind an authenticating reverse proxy).",
+    }),
+    Object.freeze({
+      key: "priority",
+      label: "Source priority",
+      type: "number",
+      min: 1,
+      max: 1000,
+      section: "Behavior",
+    }),
+    Object.freeze({
+      key: "cleanupAfterRuns",
+      label: "Clean up after runs",
+      type: "toggle",
+      section: "Behavior",
+    }),
+  ]),
+  defaults: Object.freeze({
+    enabled: false,
+    url: "",
+    apiKey: "",
+    priority: 10,
+    cleanupAfterRuns: false,
+  }),
+  validation: Object.freeze({ required: ["url"], url: ["url"] }),
+  testConnection: true,
+});
+
 let connectionCache = { checkedAt: 0, result: null, settingsKey: null };
 
 function getSettingsKey({ url, apiKey }) {
   return `${url}\u0000${apiKey}`;
 }
 
-function cacheConnectionResult(settingsKey, result) {
-  const activeSettings = getSettings();
+function cacheConnectionResult(settingsKey, result, config = null) {
+  const activeSettings = getSettings(config);
   if (getSettingsKey(activeSettings) !== settingsKey) return;
   connectionCache = { checkedAt: Date.now(), result, settingsKey };
 }
 
-function getSettings() {
-  const integrations = dbOps.getSettings()?.integrations || {};
+function getSettings(config = null) {
+  const integrations = config
+    ? { slskd: config }
+    : dbOps.getSettings()?.integrations || {};
   const slskd = integrations.slskd || {};
   const url = String(slskd.url || "")
     .trim()
@@ -34,8 +86,8 @@ function getSettings() {
   return { url, apiKey, slskd };
 }
 
-export function getSlskdSearchFormatOptions() {
-  const slskd = getSettings().slskd || {};
+export function getSlskdSearchFormatOptions(config = null) {
+  const slskd = getSettings(config).slskd || {};
   const preferredFormat =
     String(slskd.preferredFormat || "").toLowerCase() === "mp3" ? "mp3" : "flac";
   return {
@@ -44,8 +96,8 @@ export function getSlskdSearchFormatOptions() {
   };
 }
 
-export function isSlskdCleanupAfterRunsEnabled() {
-  const slskd = getSettings().slskd || {};
+export function isSlskdCleanupAfterRunsEnabled(config = null) {
+  const slskd = getSettings(config).slskd || {};
   return slskd.cleanupAfterRuns === true;
 }
 
@@ -54,22 +106,23 @@ function buildClientFromCredentials(url, apiKey) {
     .trim()
     .replace(/\/+$/, "");
   const trimmedKey = String(apiKey || "").trim();
-  if (!trimmedUrl || !trimmedKey) {
+  if (!trimmedUrl) {
     throw new Error("slskd not configured");
+  }
+  const headers = { Accept: "application/json" };
+  if (trimmedKey) {
+    headers["X-API-KEY"] = trimmedKey;
   }
   return axios.create({
     baseURL: trimmedUrl,
     timeout: 60000,
-    headers: {
-      "X-API-KEY": trimmedKey,
-      Accept: "application/json",
-    },
+    headers,
     validateStatus: () => true,
   });
 }
 
-function buildClient() {
-  const { url, apiKey } = getSettings();
+function buildClient(config = null) {
+  const { url, apiKey } = getSettings(config);
   return buildClientFromCredentials(url, apiKey);
 }
 
@@ -120,7 +173,7 @@ function readSearchResponses(searchData) {
 
 function normalizeSearchFile(file, user, response = null, fromLockedList = false) {
   const filename = String(readProperty(file, "filename", "Filename", "file", "File") || "").trim();
-  const size = Number(readProperty(file, "size", "Size", "length", "Length") || 0);
+  const size = Number(readProperty(file, "size", "Size") || 0);
   const responseUser = readProperty(response, "username", "Username");
   const resolvedUser = String(
     user || responseUser || readProperty(file, "user", "User") || "",
@@ -129,6 +182,9 @@ function normalizeSearchFile(file, user, response = null, fromLockedList = false
   const locked =
     fromLockedList || readProperty(file, "isLocked", "IsLocked", "locked", "Locked") === true;
   const bitRate = readProperty(file, "bitRate", "BitRate", "bitrate") ?? null;
+  const advertisedLength = Number(readProperty(file, "length", "Length"));
+  const length =
+    Number.isFinite(advertisedLength) && advertisedLength > 0 ? advertisedLength : null;
   return {
     user: resolvedUser,
     file: filename,
@@ -143,6 +199,7 @@ function normalizeSearchFile(file, user, response = null, fromLockedList = false
     ),
     bitRate,
     bitrate: bitRate,
+    length,
     extension: readProperty(file, "extension", "Extension") ?? null,
     locked,
     isLocked: locked,
@@ -174,19 +231,33 @@ function readId(value) {
 }
 
 export class SlskdClient {
+  constructor(config = null) {
+    this.key = "slskd";
+    this.name = "slskd";
+    this._config = config;
+  }
+
+  updateConfig(config = null) {
+    this._config = config;
+  }
+
+  isCleanupAfterRunsEnabled() {
+    return isSlskdCleanupAfterRunsEnabled(this._config);
+  }
+
   isConfigured() {
-    const { url, apiKey } = getSettings();
-    return !!(url && apiKey);
+    const { url, slskd } = getSettings(this._config);
+    return slskd.enabled !== false && !!url;
   }
 
   async testConnection({ force = false } = {}) {
-    const { url, apiKey } = getSettings();
-    if (!url || !apiKey) {
+    const { url, apiKey } = getSettings(this._config);
+    if (!url) {
       return {
         ok: false,
         configured: false,
         connected: false,
-        message: "slskd URL and API key are required",
+        message: "slskd URL is required",
       };
     }
     const settingsKey = getSettingsKey({ url, apiKey });
@@ -198,7 +269,7 @@ export class SlskdClient {
     ) {
       return connectionCache.result;
     }
-    const client = buildClient();
+    const client = buildClient(this._config);
     try {
       const [appRes, optionsRes] = await Promise.all([
         client.get("/api/v0/application"),
@@ -211,7 +282,7 @@ export class SlskdClient {
           connected: false,
           message: `slskd returned HTTP ${appRes.status}`,
         };
-        cacheConnectionResult(settingsKey, result);
+        cacheConnectionResult(settingsKey, result, this._config);
         return result;
       }
       const server = appRes.data?.server || {};
@@ -232,7 +303,7 @@ export class SlskdClient {
           ? "slskd is connected"
           : "slskd is reachable, but it is not connected to Soulseek. Open slskd and connect to the Soulseek server.",
       };
-      cacheConnectionResult(settingsKey, result);
+      cacheConnectionResult(settingsKey, result, this._config);
       return result;
     } catch (error) {
       const result = {
@@ -241,14 +312,14 @@ export class SlskdClient {
         connected: false,
         message: error?.message || "Failed to reach slskd",
       };
-      cacheConnectionResult(settingsKey, result);
+      cacheConnectionResult(settingsKey, result, this._config);
       return result;
     }
   }
 
   getStatus() {
-    const { url, apiKey } = getSettings();
-    const configured = !!(url && apiKey);
+    const { url, apiKey } = getSettings(this._config);
+    const configured = !!url;
     const cached =
       connectionCache.settingsKey === getSettingsKey({ url, apiKey })
         ? connectionCache.result
@@ -269,7 +340,7 @@ export class SlskdClient {
 
   async createSearch(searchText, options = {}) {
     return withHonkerLock("slskd-api", async () => {
-      const client = buildClient();
+      const client = buildClient(this._config);
       const id = String(options.id || randomUUID());
       const searchTimeoutMs = Math.max(
         5000,
@@ -311,7 +382,7 @@ export class SlskdClient {
   }
 
   async getSearch(searchId) {
-    const client = buildClient();
+    const client = buildClient(this._config);
     const response = await client.get(`/api/v0/searches/${searchId}`, {
       params: { includeResponses: true },
     });
@@ -322,7 +393,7 @@ export class SlskdClient {
   }
 
   async getSearchResponses(searchId) {
-    const client = buildClient();
+    const client = buildClient(this._config);
     const response = await client.get(`/api/v0/searches/${searchId}/responses`);
     if (response.status !== 200) return [];
     return readSearchResponses(response.data);
@@ -491,7 +562,7 @@ export class SlskdClient {
 
   async enqueueBatch({ username, files }) {
     return withHonkerLock("slskd-api", async () => {
-      const client = buildClient();
+      const client = buildClient(this._config);
       const normalizedUsername = String(username || "").trim();
       const requests = (Array.isArray(files) ? files : []).map((file) => ({
         filename: String(file.filename || file.file || "").trim(),
@@ -535,7 +606,7 @@ export class SlskdClient {
   }
 
   async getTransfer(username, id) {
-    const client = buildClient();
+    const client = buildClient(this._config);
     const response = await client.get(
       `/api/v0/transfers/downloads/${encodeURIComponent(username)}/${id}`,
     );
@@ -547,7 +618,7 @@ export class SlskdClient {
     const normalizedUsername = String(username || "").trim();
     const normalizedId = String(id || "").trim();
     if (!normalizedUsername || !normalizedId) return false;
-    const client = buildClient();
+    const client = buildClient(this._config);
     const response = await client.delete(
       `/api/v0/transfers/downloads/${encodeURIComponent(normalizedUsername)}/${encodeURIComponent(normalizedId)}`,
       {
@@ -558,14 +629,14 @@ export class SlskdClient {
   }
 
   async listDownloads() {
-    const client = buildClient();
+    const client = buildClient(this._config);
     const response = await client.get("/api/v0/transfers/downloads");
     if (response.status !== 200) return [];
     return Array.isArray(response.data) ? response.data : [];
   }
 
   async getEvents(offset = 0, limit = 50) {
-    const client = buildClient();
+    const client = buildClient(this._config);
     const response = await client.get("/api/v0/events", {
       params: { offset, limit },
     });
@@ -580,7 +651,7 @@ export class SlskdClient {
   }
 
   async listSearches() {
-    const client = buildClient();
+    const client = buildClient(this._config);
     const response = await client.get("/api/v0/searches");
     if (response.status !== 200) return [];
     return normalizeArrayPayload(response.data);
@@ -589,13 +660,13 @@ export class SlskdClient {
   async deleteSearch(searchId) {
     const id = String(searchId || "").trim();
     if (!id) return false;
-    const client = buildClient();
+    const client = buildClient(this._config);
     const response = await client.delete(`/api/v0/searches/${encodeURIComponent(id)}`);
     return [200, 204, 404].includes(response.status);
   }
 
   async removeCompletedDownloads() {
-    const client = buildClient();
+    const client = buildClient(this._config);
     const response = await client.delete("/api/v0/transfers/downloads/all/completed");
     return [200, 204, 404].includes(response.status);
   }

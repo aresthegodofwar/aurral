@@ -1,13 +1,11 @@
 import { dbOps } from "../db/helpers/index.js";
-import { slskdClient } from "./slskdClient.js";
 import { prowlarrClient } from "./prowlarrClient.js";
-import { nzbgetClient } from "./nzbgetClient.js";
-import { sabnzbdClient } from "./sabnzbdClient.js";
-import { ytdlpClient } from "./ytdlpClient.js";
+import { getDownloadClient } from "./download/downloadClientSettings.js";
 
 const SOURCE_LABELS = {
   slskd: "Soulseek",
   usenet: "Usenet",
+  deemix: "deemix",
   ytdlp: "yt-dlp",
 };
 
@@ -33,10 +31,15 @@ function getSlskdPriority() {
 
 function getUsenetPriority() {
   const integrations = getIntegrations();
-  if (sabnzbdClient.isConfigured()) {
+  if (getDownloadClient("sabnzbd")?.isConfigured()) {
     return normalizePriority(integrations.sabnzbd?.priority, 20);
   }
   return normalizePriority(integrations.nzbget?.priority, 20);
+}
+
+function getDeemixPriority() {
+  const deemix = getIntegrations().deemix || {};
+  return normalizePriority(deemix.priority, 15);
 }
 
 function getYtdlpPriority() {
@@ -45,12 +48,18 @@ function getYtdlpPriority() {
 }
 
 export function getDownloadSourceStatus() {
+  const slskdClient = getDownloadClient("slskd");
+  const nzbgetClient = getDownloadClient("nzbget");
+  const sabnzbdClient = getDownloadClient("sabnzbd");
+  const ytdlpClient = getDownloadClient("ytdlp");
+  const deemixClient = getDownloadClient("deemix");
   const slskdConfigured = isSlskdEnabled() && slskdClient.isConfigured();
   const prowlarrConfigured = prowlarrClient.isConfigured();
   const nzbgetConfigured = nzbgetClient.isConfigured();
   const sabnzbdConfigured = sabnzbdClient.isConfigured();
   const usenetConfigured = prowlarrConfigured && (nzbgetConfigured || sabnzbdConfigured);
   const ytdlpConfigured = ytdlpClient.isConfigured();
+  const deemixConfigured = deemixClient.isConfigured();
   return {
     slskd: {
       id: "slskd",
@@ -69,6 +78,13 @@ export function getDownloadSourceStatus() {
       nzbgetConfigured,
       sabnzbdConfigured,
     },
+    deemix: {
+      id: "deemix",
+      label: SOURCE_LABELS.deemix,
+      enabled: deemixClient.isEnabled(),
+      configured: deemixConfigured,
+      priority: getDeemixPriority(),
+    },
     ytdlp: {
       id: "ytdlp",
       label: SOURCE_LABELS.ytdlp,
@@ -84,6 +100,7 @@ export function getEnabledDownloadSources() {
   const sources = [];
   if (status.slskd.configured) sources.push(status.slskd);
   if (status.usenet.configured) sources.push(status.usenet);
+  if (status.deemix.configured) sources.push(status.deemix);
   if (status.ytdlp.configured) sources.push(status.ytdlp);
   return sources.sort((left, right) => {
     if (left.priority !== right.priority) return left.priority - right.priority;
@@ -100,8 +117,9 @@ export function getDownloadSourceNotConfiguredMessage() {
   const pieces = [];
   if (!status.slskd.configured) pieces.push("slskd");
   if (!status.usenet.configured) pieces.push("Prowlarr + NZBGet or SABnzbd");
+  if (!status.deemix.configured) pieces.push("deemix");
   if (!status.ytdlp.configured) pieces.push("yt-dlp");
-  return `No download source is configured. Configure ${pieces.join(" or ")} in Settings > Integrations to enable downloads for flows and playlists.`;
+  return `No download source is configured. Configure ${pieces.join(" or ")} in Settings > Download clients; configure Prowlarr under Settings > Indexers to enable downloads for flows and playlists.`;
 }
 
 export function getSourceLabel(sourceId) {

@@ -12,7 +12,10 @@ const PATH_MAPPING_SOURCE_OPTIONS = [
   { value: "slskd", label: "slskd" },
   { value: "nzbget", label: "NZBGet" },
   { value: "sabnzbd", label: "SABnzbd" },
+  { value: "deemix", label: "deemix" },
   { value: "plex", label: "Plex" },
+  { value: "jellyfin", label: "Jellyfin" },
+  { value: "navidrome", label: "Navidrome" },
 ];
 
 const EMPTY_MAPPING = { source: "all", remote: "", local: "" };
@@ -73,7 +76,7 @@ export function PathMappingModal({ title, initialValue, onClose, onSave }) {
           </div>
           <div className="arr-modal__body">
             <SettingsArrFormGroup
-              label="Applies To"
+              label="Applies to"
               help="Limit this mapping to paths reported by a specific integration, or use all sources."
             >
               <SettingsSelect
@@ -93,7 +96,7 @@ export function PathMappingModal({ title, initialValue, onClose, onSave }) {
               </SettingsSelect>
             </SettingsArrFormGroup>
             <SettingsArrFormGroup
-              label="Remote Path"
+              label="Remote path"
               help="Path the other app reports, such as a host-only mount path from Lidarr or NZBGet."
             >
               <SettingsInput
@@ -108,7 +111,7 @@ export function PathMappingModal({ title, initialValue, onClose, onSave }) {
               />
             </SettingsArrFormGroup>
             <SettingsArrFormGroup
-              label="Local Path"
+              label="Local path"
               help="Path Aurral should use inside its container to read that remote path."
             >
               <div className="arr-path-input">

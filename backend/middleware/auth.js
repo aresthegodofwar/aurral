@@ -1,7 +1,6 @@
 import crypto from "crypto";
 import os from "os";
 import { dbOps, userOps } from "../db/helpers/index.js";
-import { getDefaultListenHistoryProfile } from "../services/listeningHistory.js";
 import { createSession, getSessionByToken } from "../config/session-helpers.js";
 import { hashPassword, verifyPassword, needsRehash } from "./passwordHash.js";
 
@@ -10,6 +9,13 @@ const safeCompare = (a, b) => {
   const bufB = Buffer.from(String(b));
   return bufA.length === bufB.length && crypto.timingSafeEqual(bufA, bufB);
 };
+
+function createSubsonicToken(password, salt) {
+  // Subsonic requires MD5(password + salt) for token authentication; this digest is never stored.
+  //
+  // codeql[js/insufficient-password-hash]
+  return crypto.createHash("md5").update(`${password}${salt}`).digest("hex");
+}
 
 const DEFAULT_PROXY_HEADER = "x-forwarded-user";
 const STREAM_TOKEN_TTL_MS = 2 * 60 * 1000;
@@ -81,7 +87,9 @@ export const rotateApiKey = () => {
 };
 
 export const isProxyAuthEnabled = () => {
-  if (process.env.AUTH_PROXY_ENABLED === "true") return true;
+  if (process.env.AUTH_PROXY_ENABLED !== undefined) {
+    return process.env.AUTH_PROXY_ENABLED === "true";
+  }
   return !!process.env.AUTH_PROXY_HEADER;
 };
 
@@ -245,6 +253,7 @@ function buildPermissions(role, permissions) {
       changeMonitoring: true,
       deleteArtist: true,
       deleteAlbum: true,
+      deleteTrack: true,
     };
   }
   return {
@@ -521,14 +530,10 @@ function migrateLegacyAdmin() {
   const authPassword = settings.integrations?.general?.authPassword;
   if (!onboardingComplete || !authPassword) return;
   const hash = hashPassword(authPassword);
-  const created = userOps.createUser(authUser, hash, "admin", null);
-  const initialListenHistory = getDefaultListenHistoryProfile(settings);
-  if (created && initialListenHistory) {
-    userOps.updateUser(created.id, initialListenHistory);
-  }
+  userOps.createUser(authUser, hash, "admin", null, true, true, authPassword);
 }
 
-function resolveUser(username, password) {
+export function resolveUser(username, password) {
   if (userOps.countUsers() === 0) {
     migrateLegacyAdmin();
     if (userOps.countUsers() === 0) return null;
@@ -540,7 +545,12 @@ function resolveUser(username, password) {
   if (!u || !password) return null;
   if (!verifyPassword(password, u.passwordHash)) return null;
   if (needsRehash(u.passwordHash)) {
-    userOps.updateUser(u.id, { passwordHash: hashPassword(password) });
+    userOps.updateUser(u.id, {
+      passwordHash: hashPassword(password),
+      subsonicPassword: password,
+    });
+  } else {
+    userOps.syncSubsonicPassword(u.id, password);
   }
   const perms = buildPermissions(u.role, u.permissions);
   return {
@@ -549,6 +559,30 @@ function resolveUser(username, password) {
     role: u.role,
     permissions: perms,
   };
+}
+
+export function resolveSubsonicTokenUser(username, token, salt) {
+  if (!/^[a-f\d]{32}$/i.test(String(token || "")) || !String(salt || "")) return null;
+  if (userOps.countUsers() === 0) migrateLegacyAdmin();
+  const normalizedUsername = String(username || "").trim().toLowerCase();
+  const user = userOps.getUserByUsername(normalizedUsername);
+  if (!user) return null;
+
+  let password = userOps.getSubsonicPasswordById(user.id);
+  if (
+    !password &&
+    safeCompare(normalizedUsername, String(getAuthUser()).trim().toLowerCase())
+  ) {
+    password = getAuthPassword().find((candidate) =>
+      safeCompare(createSubsonicToken(candidate, salt), token),
+    );
+  }
+  if (!password) return null;
+
+  const expectedToken = createSubsonicToken(password, salt);
+  return safeCompare(expectedToken, token)
+    ? resolveUser(normalizedUsername, password)
+    : null;
 }
 
 function legacyAuth(username, password) {
@@ -570,6 +604,7 @@ function legacyAuth(username, password) {
       changeMonitoring: true,
       deleteArtist: true,
       deleteAlbum: true,
+      deleteTrack: true,
     },
   };
 }
@@ -659,6 +694,7 @@ export const authMiddleware = (req, res, next) => {
     }
     if (
       /^\/api\/library\/stream\/[^/]+$/.test(req.path) ||
+      /^\/api\/library\/canonical-stream\/[^/]+\/[^/]+$/i.test(req.path) ||
       /^\/api\/library\/file-stream\/[^/]+\/[^/]+$/i.test(req.path) ||
       /^\/api\/artists\/[a-f0-9-]{36}\/stream$/i.test(req.path) ||
       /^\/api\/weekly-flow\/stream\/[^/]+$/i.test(req.path) ||
@@ -677,7 +713,8 @@ export const authMiddleware = (req, res, next) => {
       req.path === "/api/auth/google/login" ||
       req.path === "/api/auth/google/exchange" ||
       req.path === "/api/auth/plex/login/pin" ||
-      req.path === "/api/auth/plex/login/complete"
+      req.path === "/api/auth/plex/login/complete" ||
+      (req.method === "GET" && req.path === "/api/scrobbling/lastfm/link/callback")
     ) {
       return next();
     }

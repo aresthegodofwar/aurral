@@ -2,6 +2,7 @@ import Database from "better-sqlite3";
 import path from "path";
 import fs from "fs";
 import { initializeSchemaOnStartup } from "./schema-migration-v2.js";
+import { initializeLibrarySearchIndex } from "./library-search-index.js";
 import { syncDownloadFolderPath } from "../services/downloadFolderConfig.js";
 import { ensureDataDir } from "./data-dir.js";
 
@@ -20,8 +21,8 @@ const db = new Database(DB_PATH);
 db.pragma("journal_mode = WAL");
 db.pragma("busy_timeout = 5000");
 db.pragma("synchronous = NORMAL");
-db.pragma("cache_size = -64000");
-db.pragma("mmap_size = 268435456");
+db.pragma("cache_size = -24000");
+db.pragma("mmap_size = 25165824");
 
 function tryAddColumn(sql) {
   try {
@@ -52,6 +53,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS images_cache (
     mbid TEXT PRIMARY KEY,
     image_url TEXT,
+    images_json TEXT,
     cache_age INTEGER,
     created_at TEXT NOT NULL
   );
@@ -60,6 +62,7 @@ db.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT UNIQUE NOT NULL,
     password_hash TEXT NOT NULL,
+    subsonic_password TEXT,
     role TEXT NOT NULL DEFAULT 'user',
     permissions TEXT,
     discover_layout TEXT
@@ -87,6 +90,48 @@ db.exec(`
     linked_at INTEGER NOT NULL,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
   );
+
+  CREATE TABLE IF NOT EXISTS lastfm_link_states (
+    token_hash TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    browser_nonce_hash TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    consumed_at INTEGER,
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_lastfm_link_states_expiry
+    ON lastfm_link_states(expires_at);
+
+  CREATE TABLE IF NOT EXISTS subsonic_stars (
+    user_id INTEGER NOT NULL,
+    entity_kind TEXT NOT NULL,
+    entity_key TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (user_id, entity_kind, entity_key),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS play_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    track_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    artist TEXT NOT NULL,
+    album TEXT,
+    artist_mbid TEXT,
+    album_mbid TEXT,
+    track_mbid TEXT,
+    duration_ms INTEGER,
+    played_at INTEGER NOT NULL,
+    source TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_play_events_user_played_at
+    ON play_events(user_id, played_at DESC);
 
   CREATE TABLE IF NOT EXISTS playlist_download_jobs (
     id TEXT PRIMARY KEY,
@@ -158,8 +203,120 @@ db.exec(`
     updated_at INTEGER NOT NULL
   );
 
+  CREATE TABLE IF NOT EXISTS library_artists (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    identity_key TEXT NOT NULL UNIQUE,
+    mbid TEXT,
+    name TEXT NOT NULL,
+    sort_name TEXT,
+    metadata_json TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS library_albums (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    identity_key TEXT NOT NULL UNIQUE,
+    mbid TEXT,
+    release_group_mbid TEXT,
+    artist_id INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    album_artist TEXT,
+    release_date TEXT,
+    metadata_json TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    FOREIGN KEY (artist_id) REFERENCES library_artists(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS library_tracks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    identity_key TEXT NOT NULL UNIQUE,
+    mbid TEXT,
+    title TEXT NOT NULL,
+    artist_name TEXT,
+    metadata_json TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS library_album_tracks (
+    album_id INTEGER NOT NULL,
+    track_id INTEGER NOT NULL,
+    disc_number INTEGER NOT NULL DEFAULT 1,
+    track_number INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (album_id, track_id, disc_number, track_number),
+    FOREIGN KEY (album_id) REFERENCES library_albums(id) ON DELETE CASCADE,
+    FOREIGN KEY (track_id) REFERENCES library_tracks(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS library_media_files (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    track_id INTEGER NOT NULL,
+    album_id INTEGER,
+    source TEXT NOT NULL,
+    path TEXT NOT NULL,
+    format TEXT,
+    size INTEGER NOT NULL DEFAULT 0,
+    mtime_ms INTEGER,
+    duration_ms INTEGER,
+    quality_json TEXT,
+    available INTEGER NOT NULL DEFAULT 1,
+    last_seen_scan_id INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    UNIQUE (source, path),
+    FOREIGN KEY (track_id) REFERENCES library_tracks(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS library_scan_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL,
+    root_path TEXT,
+    status TEXT NOT NULL,
+    started_at INTEGER NOT NULL,
+    completed_at INTEGER,
+    error TEXT,
+    files_seen INTEGER NOT NULL DEFAULT 0,
+    files_indexed INTEGER NOT NULL DEFAULT 0,
+    files_failed INTEGER NOT NULL DEFAULT 0
+  );
+
   CREATE INDEX IF NOT EXISTS idx_lidarr_artist_id_map_foreign_id
     ON lidarr_artist_id_map (lidarr_foreign_artist_id);
+  CREATE INDEX IF NOT EXISTS idx_library_albums_artist_id
+    ON library_albums (artist_id);
+  CREATE INDEX IF NOT EXISTS idx_library_albums_mbid
+    ON library_albums (mbid);
+  CREATE INDEX IF NOT EXISTS idx_library_albums_release_group_mbid
+    ON library_albums (release_group_mbid);
+  CREATE INDEX IF NOT EXISTS idx_library_albums_title
+    ON library_albums (title COLLATE NOCASE);
+  CREATE INDEX IF NOT EXISTS idx_library_albums_release_date
+    ON library_albums (release_date DESC);
+  CREATE INDEX IF NOT EXISTS idx_library_artists_sort_name_name
+    ON library_artists (sort_name COLLATE NOCASE, name COLLATE NOCASE);
+  CREATE INDEX IF NOT EXISTS idx_library_artists_mbid
+    ON library_artists (mbid);
+  CREATE INDEX IF NOT EXISTS idx_library_artists_provider_id
+    ON library_artists (CAST(CASE WHEN json_valid(metadata_json) THEN json_extract(metadata_json, '$.id') END AS TEXT));
+  CREATE INDEX IF NOT EXISTS idx_library_artists_foreign_artist_id
+    ON library_artists (CAST(CASE WHEN json_valid(metadata_json) THEN json_extract(metadata_json, '$.foreignArtistId') END AS TEXT));
+  CREATE INDEX IF NOT EXISTS idx_library_artists_name
+    ON library_artists (name COLLATE NOCASE);
+  CREATE INDEX IF NOT EXISTS idx_library_album_tracks_track_id
+    ON library_album_tracks (track_id);
+  CREATE INDEX IF NOT EXISTS idx_library_tracks_title
+    ON library_tracks (title COLLATE NOCASE);
+  CREATE INDEX IF NOT EXISTS idx_library_media_files_track_id
+    ON library_media_files (track_id);
+  CREATE INDEX IF NOT EXISTS idx_library_media_files_track_source_available
+    ON library_media_files (track_id, source, available);
+  CREATE INDEX IF NOT EXISTS idx_library_media_files_source_available
+    ON library_media_files (source, available);
+  CREATE INDEX IF NOT EXISTS idx_library_media_files_scan_id
+    ON library_media_files (last_seen_scan_id);
 
   CREATE TABLE IF NOT EXISTS aurral_history (
     id TEXT PRIMARY KEY,
@@ -243,6 +400,8 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
   CREATE UNIQUE INDEX IF NOT EXISTS idx_user_identities_provider_subject ON user_identities(provider_type, provider_key, subject);
   CREATE INDEX IF NOT EXISTS idx_user_identities_user_id ON user_identities(user_id);
+  CREATE INDEX IF NOT EXISTS idx_subsonic_stars_user_created
+    ON subsonic_stars (user_id, created_at);
   CREATE INDEX IF NOT EXISTS idx_aurral_history_created_at ON aurral_history(created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_inbox_items_user_state ON inbox_items(user_id, is_dismissed, is_read, created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_inbox_items_expiry ON inbox_items(expires_at, created_at DESC);
@@ -253,6 +412,82 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_honker_task_runs_started_at ON honker_task_runs(started_at DESC);
   CREATE INDEX IF NOT EXISTS idx_honker_task_runs_queue_started ON honker_task_runs(queue, started_at DESC);
   CREATE INDEX IF NOT EXISTS idx_honker_task_runs_job ON honker_task_runs(job_id, queue);
+`);
+
+tryAddColumn("ALTER TABLE library_media_files ADD COLUMN album_id INTEGER");
+tryAddColumn("ALTER TABLE images_cache ADD COLUMN images_json TEXT");
+
+function hasUniqueIndex(columns) {
+  return db.prepare("PRAGMA index_list(library_media_files)").all().some((index) => {
+    if (!index.unique) return false;
+    const indexName = String(index.name).replaceAll('"', '""');
+    const indexColumns = db
+      .prepare(`PRAGMA index_info("${indexName}")`)
+      .all()
+      .map((column) => column.name);
+    return JSON.stringify(indexColumns) === JSON.stringify(columns);
+  });
+}
+
+if (hasUniqueIndex(["path"])) {
+  db.transaction(() => {
+    db.exec(`
+      CREATE TABLE library_media_files_v3 (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        track_id INTEGER NOT NULL,
+        album_id INTEGER,
+        source TEXT NOT NULL,
+        path TEXT NOT NULL,
+        format TEXT,
+        size INTEGER NOT NULL DEFAULT 0,
+        mtime_ms INTEGER,
+        duration_ms INTEGER,
+        quality_json TEXT,
+        available INTEGER NOT NULL DEFAULT 1,
+        last_seen_scan_id INTEGER,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE (source, path),
+        FOREIGN KEY (track_id) REFERENCES library_tracks(id) ON DELETE CASCADE
+      );
+
+      INSERT INTO library_media_files_v3
+        (id, track_id, album_id, source, path, format, size, mtime_ms, duration_ms, quality_json,
+         available, last_seen_scan_id, created_at, updated_at)
+      SELECT id, track_id, album_id, source, path, format, size, mtime_ms, duration_ms, quality_json,
+        available, last_seen_scan_id, created_at, updated_at
+      FROM library_media_files;
+
+      DROP TABLE library_media_files;
+      ALTER TABLE library_media_files_v3 RENAME TO library_media_files;
+    `);
+  })();
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_library_media_files_track_id
+      ON library_media_files (track_id);
+    CREATE INDEX IF NOT EXISTS idx_library_media_files_track_source_available
+      ON library_media_files (track_id, source, available);
+    CREATE INDEX IF NOT EXISTS idx_library_media_files_source_available
+      ON library_media_files (source, available);
+    CREATE INDEX IF NOT EXISTS idx_library_media_files_scan_id
+      ON library_media_files (last_seen_scan_id);
+  `);
+}
+
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_library_artists_provider_id
+    ON library_artists (CAST(CASE WHEN json_valid(metadata_json) THEN json_extract(metadata_json, '$.id') END AS TEXT));
+  CREATE INDEX IF NOT EXISTS idx_library_artists_foreign_artist_id
+    ON library_artists (CAST(CASE WHEN json_valid(metadata_json) THEN json_extract(metadata_json, '$.foreignArtistId') END AS TEXT));
+  CREATE INDEX IF NOT EXISTS idx_library_artists_name
+    ON library_artists (name COLLATE NOCASE);
+  CREATE INDEX IF NOT EXISTS idx_library_media_files_album_source_available
+    ON library_media_files (album_id, source, available);
+  CREATE INDEX IF NOT EXISTS idx_library_media_files_track_album_source_available
+    ON library_media_files (track_id, album_id, source, available);
+  CREATE INDEX IF NOT EXISTS idx_library_media_files_track_album_source_available_created
+    ON library_media_files (track_id, album_id, source, available, created_at DESC);
 `);
 
 const duplicateLidarrArtistIds = db
@@ -405,6 +640,12 @@ db.exec(`
   WHERE needs_identity_migration = 1
     AND id IN (SELECT DISTINCT user_id FROM user_identities)
 `);
+if (!userColumns.includes("default_library_owner")) {
+  tryAddColumn("ALTER TABLE users ADD COLUMN default_library_owner TEXT");
+}
+if (!userColumns.includes("subsonic_password")) {
+  tryAddColumn("ALTER TABLE users ADD COLUMN subsonic_password TEXT");
+}
 
 db.exec(`
   UPDATE users
@@ -443,6 +684,27 @@ export const dbHelpers = {
 };
 
 initializeSchemaOnStartup(db, dbHelpers);
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS playlist_download_jobs_revision (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    revision INTEGER NOT NULL DEFAULT 0
+  );
+  INSERT OR IGNORE INTO playlist_download_jobs_revision (id, revision) VALUES (1, 0);
+  CREATE TRIGGER IF NOT EXISTS playlist_download_jobs_revision_insert
+    AFTER INSERT ON playlist_download_jobs BEGIN
+      UPDATE playlist_download_jobs_revision SET revision = revision + 1 WHERE id = 1;
+    END;
+  CREATE TRIGGER IF NOT EXISTS playlist_download_jobs_revision_update
+    AFTER UPDATE ON playlist_download_jobs BEGIN
+      UPDATE playlist_download_jobs_revision SET revision = revision + 1 WHERE id = 1;
+    END;
+  CREATE TRIGGER IF NOT EXISTS playlist_download_jobs_revision_delete
+    AFTER DELETE ON playlist_download_jobs BEGIN
+      UPDATE playlist_download_jobs_revision SET revision = revision + 1 WHERE id = 1;
+    END;
+`);
+initializeLibrarySearchIndex(db);
 
 const existingDownloadFolder = db
   .prepare("SELECT value FROM settings WHERE key = ?")
