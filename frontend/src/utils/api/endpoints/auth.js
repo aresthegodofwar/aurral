@@ -145,8 +145,8 @@ export const linkManagedPlexUser = (userId, plexUserId, { plexUsername, plexUuid
     pin,
   });
 
-export const adminUnlinkPlex = async (userId) => {
-  await deleteData(`/users/${userId}/plex-link`);
+export const adminUnlinkPlex = async (userId, { force = false } = {}) => {
+  await deleteData(`/users/${userId}/plex-link`, force ? { params: { force: true } } : undefined);
 };
 
 export const getMyIdentities = () => getData("/users/me/identities");

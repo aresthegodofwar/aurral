@@ -1,5 +1,6 @@
 import { userOps, userIdentityOps } from "../../db/helpers/index.js";
 import { requireAuth, requireRecentAuth } from "../../middleware/requirePermission.js";
+import { disconnectUserPlex } from "./plexLinkHandlers.js";
 
 export function registerIdentityLink(router) {
   router.get("/me/identities", requireAuth, (req, res) => {
@@ -19,7 +20,7 @@ export function registerIdentityLink(router) {
     });
   });
 
-  router.delete("/me/identities/:id", requireAuth, requireRecentAuth(), (req, res) => {
+  router.delete("/me/identities/:id", requireAuth, requireRecentAuth(), async (req, res) => {
     const identityId = parseInt(req.params.id, 10);
     const identity = userIdentityOps.getById(identityId);
     if (!identity || identity.userId !== req.user.id) {
@@ -36,7 +37,16 @@ export function registerIdentityLink(router) {
       });
     }
 
-    userIdentityOps.unlink(identityId);
+    if (identity.providerType === "plex") {
+      const result = await disconnectUserPlex(req.user.id, {
+        context: "from connected accounts",
+      });
+      if (!result.disconnected) {
+        return res.status(400).json({ error: result.error, message: result.message });
+      }
+    } else {
+      userIdentityOps.unlink(identityId);
+    }
     res.json({ success: true });
   });
 }

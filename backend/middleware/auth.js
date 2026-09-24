@@ -542,7 +542,7 @@ export function resolveUser(username, password) {
     .trim()
     .toLowerCase();
   const u = userOps.getUserByUsername(un);
-  if (!u || !password) return null;
+  if (!u || u.status !== "active" || !password) return null;
   if (!verifyPassword(password, u.passwordHash)) return null;
   if (needsRehash(u.passwordHash)) {
     userOps.updateUser(u.id, {
@@ -612,7 +612,8 @@ function legacyAuth(username, password) {
 export function resolveLocalNetworkBypassUser(req) {
   const status = getLocalNetworkBypassStatus(req);
   if (!status.active) return null;
-  return toResolvedUser(getSoleAdminUser());
+  const user = getSoleAdminUser();
+  return user?.status === "active" ? toResolvedUser(user) : null;
 }
 
 export function resolveRequestUser(req) {

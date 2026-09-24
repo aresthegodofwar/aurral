@@ -18,6 +18,7 @@ if (!fs.existsSync(path.dirname(DB_PATH))) {
 
 const db = new Database(DB_PATH);
 
+db.pragma("foreign_keys = ON");
 db.pragma("journal_mode = WAL");
 db.pragma("busy_timeout = 5000");
 db.pragma("synchronous = NORMAL");
@@ -612,13 +613,34 @@ if (!userColumns.includes("status")) {
   tryAddColumn("ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'active'");
 }
 if (!userColumns.includes("is_protected")) {
-  tryAddColumn("ALTER TABLE users ADD COLUMN is_protected INTEGER NOT NULL DEFAULT 0");
+  db.transaction(() => {
+    tryAddColumn("ALTER TABLE users ADD COLUMN is_protected INTEGER NOT NULL DEFAULT 0");
+    const integrationsRow = db.prepare("SELECT value FROM settings WHERE key = 'integrations'").get();
+    let integrations = null;
+    try {
+      integrations = JSON.parse(integrationsRow?.value || "null");
+    } catch {
+      integrations = null;
+    }
+    const legacyUsername = String(integrations?.general?.authUser || "admin").trim();
+    if (legacyUsername && integrations?.general?.authPassword) {
+      db.prepare(
+        "UPDATE users SET is_protected = 1 WHERE LOWER(username) = LOWER(?) AND role = 'admin'",
+      ).run(legacyUsername);
+    }
+  })();
 }
 if (!userColumns.includes("role_source")) {
   tryAddColumn("ALTER TABLE users ADD COLUMN role_source TEXT NOT NULL DEFAULT 'local'");
 }
 if (!userColumns.includes("has_local_password")) {
-  tryAddColumn("ALTER TABLE users ADD COLUMN has_local_password INTEGER NOT NULL DEFAULT 0");
+  db.transaction(() => {
+    tryAddColumn("ALTER TABLE users ADD COLUMN has_local_password INTEGER NOT NULL DEFAULT 0");
+    // Old rows cannot reliably distinguish local passwords from random hashes
+    // generated for external users. Expire sessions so the next successful
+    // local login can prove and record that a usable password exists.
+    db.exec("DELETE FROM sessions");
+  })();
 }
 if (!userColumns.includes("needs_identity_migration")) {
   db.transaction(() => {

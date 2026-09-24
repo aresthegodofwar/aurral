@@ -10,12 +10,19 @@ import {
   startServerProcess,
 } from "../helpers/backendTestHarness.js";
 
-const [isolatedState, { db }, { userOps, userIdentityOps, dbOps }, { createSession }] =
+const [
+  isolatedState,
+  { db },
+  { userOps, userIdentityOps, dbOps },
+  { createSession },
+  { plexConnectionStore },
+] =
   await setupIsolatedBackend(
     "identity-link-routes",
     "backend/config/db-sqlite.js",
     "backend/db/helpers/index.js",
     "backend/config/session-helpers.js",
+    "backend/services/plex/plexConnectionStore.js",
   );
 
 let server = null;
@@ -230,4 +237,49 @@ test("lockout protection blocks removing the last usable auth method", async () 
   });
   assert.equal(response.status, 400);
   assert.equal(userIdentityOps.countForUser(oidcOnlyUser.id), 1);
+});
+
+test("removing Plex from connected accounts also clears its saved connection", async () => {
+  const user = userOps.createUser("generic-plex-unlink", bcrypt.hashSync("password123", 4));
+  const identity = userIdentityOps.link(user.id, {
+    providerType: "plex",
+    providerKey: "plex",
+    subject: "generic-plex-subject",
+  });
+  plexConnectionStore.saveConnection(user.id, {
+    linkType: "self",
+    token: "generic-plex-token",
+    clientId: "generic-plex-client",
+    plexAccountId: "generic-plex-subject",
+  });
+  const token = await login("generic-plex-unlink", "password123");
+
+  const { response } = await apiFetch(token, `/api/users/me/identities/${identity.id}`, {
+    method: "DELETE",
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(userIdentityOps.getById(identity.id), null);
+  assert.equal(plexConnectionStore.getConnection(user.id), null);
+});
+
+test("replacing a provider identity removes the former Plex subject", () => {
+  const user = userOps.createUser("plex-replacement", bcrypt.hashSync("password123", 4));
+  userIdentityOps.link(user.id, {
+    providerType: "plex",
+    providerKey: "plex",
+    subject: "former-subject",
+  });
+
+  userIdentityOps.replaceForUser(user.id, {
+    providerType: "plex",
+    providerKey: "plex",
+    subject: "replacement-subject",
+  });
+
+  assert.equal(userIdentityOps.findByProvider("plex", "plex", "former-subject"), null);
+  assert.equal(
+    userIdentityOps.findByProvider("plex", "plex", "replacement-subject")?.userId,
+    user.id,
+  );
 });

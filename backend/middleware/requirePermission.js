@@ -36,7 +36,7 @@ export function requireAdmin(req, res, next) {
 
 export function isRecentlyAuthenticated(req, maxAgeMinutes = DEFAULT_REAUTH_MAX_AGE_MINUTES) {
   const token = getBearerToken(req);
-  if (!token) return true;
+  if (!token) return false;
   const session = getSessionByToken(token);
   if (!session) return false;
   const ageMs = Date.now() - session.reauthenticatedAt;

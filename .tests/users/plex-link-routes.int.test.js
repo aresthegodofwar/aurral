@@ -237,6 +237,60 @@ test("admin DELETE /:id/plex-link also removes the user's Plex login identity", 
   );
 });
 
+test("admin Plex unlink requires an explicit, recently authenticated force to remove the final sign-in method", async () => {
+  const target = userOps.createUser(
+    "plex-force-target",
+    bcrypt.hashSync("unused-password", 4),
+    "user",
+    null,
+    false,
+  );
+  plexConnectionStore.saveConnection(target.id, {
+    linkType: "self",
+    token: "force-target-token",
+    clientId: "force-target-client",
+    plexAccountId: 991,
+  });
+  const identity = userIdentityOps.link(target.id, {
+    providerType: "plex",
+    providerKey: "plex",
+    subject: "991",
+  });
+
+  const blocked = await apiFetch(adminToken, `/api/users/${target.id}/plex-link`, {
+    method: "DELETE",
+  });
+  assert.equal(blocked.response.status, 409);
+  assert.equal(blocked.payload.requiresForce, true);
+  assert.ok(plexConnectionStore.getConnection(target.id));
+
+  db.prepare("UPDATE sessions SET reauthenticated_at = ? WHERE token = ?").run(
+    Date.now() - 20 * 60 * 1000,
+    adminToken,
+  );
+  const staleForce = await apiFetch(
+    adminToken,
+    `/api/users/${target.id}/plex-link?force=true`,
+    { method: "DELETE" },
+  );
+  assert.equal(staleForce.response.status, 401);
+
+  const reauth = await apiFetch(adminToken, "/api/auth/reauth", {
+    method: "POST",
+    body: JSON.stringify({ currentPassword: "password123" }),
+  });
+  assert.equal(reauth.response.status, 200);
+  const forced = await apiFetch(
+    adminToken,
+    `/api/users/${target.id}/plex-link?force=true`,
+    { method: "DELETE" },
+  );
+  assert.equal(forced.response.status, 200);
+  assert.equal(forced.payload.forced, true);
+  assert.equal(plexConnectionStore.getConnection(target.id), null);
+  assert.equal(userIdentityOps.getById(identity.id), null);
+});
+
 test("Plex login routes are disabled unless integrations.plex.loginEnabled is set", async () => {
   const { response: pinResponse } = await apiFetch(null, "/api/auth/plex/login/pin", {
     method: "POST",
