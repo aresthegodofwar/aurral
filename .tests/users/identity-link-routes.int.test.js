@@ -6,6 +6,7 @@ import bcrypt from "bcrypt";
 import {
   setupIsolatedBackend,
   cleanupIsolatedState,
+  importFromRepo,
   resetDatabase,
   startServerProcess,
 } from "../helpers/backendTestHarness.js";
@@ -281,5 +282,58 @@ test("replacing a provider identity removes the former Plex subject", () => {
   assert.equal(
     userIdentityOps.findByProvider("plex", "plex", "replacement-subject")?.userId,
     user.id,
+  );
+});
+
+test("a conflicting Plex identity rolls back the connection and identity replacement", async () => {
+  const { persistSelfPlexLink } = await importFromRepo(
+    "backend/routes/users/plexLinkHandlers.js",
+  );
+  const owner = userOps.createUser("plex-conflict-owner", "unused", "user");
+  const contender = userOps.createUser("plex-conflict-contender", "unused", "user");
+  userIdentityOps.link(owner.id, {
+    providerType: "plex",
+    providerKey: "plex",
+    subject: "claimed-subject",
+  });
+  const originalIdentity = userIdentityOps.link(contender.id, {
+    providerType: "plex",
+    providerKey: "plex",
+    subject: "original-subject",
+  });
+  plexConnectionStore.saveConnection(contender.id, {
+    linkType: "self",
+    token: "original-token",
+    clientId: "original-client",
+    plexAccountId: "original-subject",
+  });
+
+  assert.throws(
+    () =>
+      persistSelfPlexLink(
+        contender.id,
+        {
+          linkType: "self",
+          token: "replacement-token",
+          clientId: "replacement-client",
+          plexAccountId: "claimed-subject",
+        },
+        {
+          providerType: "plex",
+          providerKey: "plex",
+          subject: "claimed-subject",
+        },
+      ),
+    (error) => String(error?.code || "").startsWith("SQLITE_CONSTRAINT"),
+  );
+
+  const connection = plexConnectionStore.getConnection(contender.id);
+  assert.equal(connection.token, "original-token");
+  assert.equal(connection.clientId, "original-client");
+  assert.equal(connection.plexAccountId, "original-subject");
+  assert.equal(userIdentityOps.getById(originalIdentity.id)?.subject, "original-subject");
+  assert.equal(
+    userIdentityOps.findByProvider("plex", "plex", "claimed-subject")?.userId,
+    owner.id,
   );
 });

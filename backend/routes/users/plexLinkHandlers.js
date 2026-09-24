@@ -1,3 +1,4 @@
+import { db } from "../../config/db-sqlite.js";
 import { dbOps, userOps, userIdentityOps } from "../../db/helpers/index.js";
 import {
   isRecentlyAuthenticated,
@@ -18,9 +19,9 @@ export function isPlexLoginEnabled() {
   return plex.loginEnabled === true && !!plex.url && !!plex.token;
 }
 
-async function cleanupUserPlexPlaylistsSafely(userId, context) {
+async function cleanupUserPlexPlaylistsSafely(userId, context, connection = null) {
   try {
-    await playlistManager.cleanupUserPlexPlaylists(userId);
+    await playlistManager.cleanupUserPlexPlaylists(userId, connection);
   } catch (cleanupError) {
     logger.warn("users", `Plex playlist cleanup ${context} failed:`, cleanupError.message);
   }
@@ -50,14 +51,25 @@ export async function disconnectUserPlex(userId, { force = false, context = "on 
   return { disconnected: true, forced: !!force };
 }
 
-async function cleanupPlexPlaylistsIfIdentityChanged(userId, linkType, plexAccountId) {
-  const previous = plexConnectionStore.getConnection(userId);
-  const identityChanged =
-    previous &&
+async function cleanupPlexPlaylistsIfIdentityChanged(
+  userId,
+  previous,
+  linkType,
+  plexAccountId,
+) {
+  const identityChanged = previous &&
     (previous.linkType !== linkType ||
       String(previous.plexAccountId ?? "") !== String(plexAccountId ?? ""));
   if (!identityChanged) return;
-  await cleanupUserPlexPlaylistsSafely(userId, "before relink");
+  await cleanupUserPlexPlaylistsSafely(userId, "after relink", previous);
+}
+
+export function persistSelfPlexLink(userId, connection, identity) {
+  return db.transaction(() => {
+    const saved = plexConnectionStore.saveConnection(userId, connection);
+    userIdentityOps.replaceForUser(userId, identity);
+    return saved;
+  })();
 }
 
 // Resolves the token Plex actually accepts for the configured server: the
@@ -192,23 +204,41 @@ export function registerPlexLink(router) {
         });
       }
 
-      await cleanupPlexPlaylistsIfIdentityChanged(req.user.id, "self", identity.id);
+      const previousConnection = plexConnectionStore.getConnection(req.user.id);
+      let saved;
+      try {
+        saved = persistSelfPlexLink(
+          req.user.id,
+          {
+            linkType: "self",
+            token: serverToken,
+            clientId,
+            plexAccountId: identity.id ?? null,
+            plexUuid: identity.uuid || null,
+            plexUsername: identity.username || identity.title || null,
+          },
+          {
+            providerType: "plex",
+            providerKey: "plex",
+            subject,
+            displayName: identity.username || identity.title || null,
+          },
+        );
+      } catch (error) {
+        if (String(error?.code || "").startsWith("SQLITE_CONSTRAINT")) {
+          return res.status(409).json({
+            error: "This Plex account is already linked to another Aurral account",
+          });
+        }
+        throw error;
+      }
 
-      const saved = plexConnectionStore.saveConnection(req.user.id, {
-        linkType: "self",
-        token: serverToken,
-        clientId,
-        plexAccountId: identity.id ?? null,
-        plexUuid: identity.uuid || null,
-        plexUsername: identity.username || identity.title || null,
-      });
-
-      userIdentityOps.replaceForUser(req.user.id, {
-        providerType: "plex",
-        providerKey: "plex",
-        subject,
-        displayName: identity.username || identity.title || null,
-      });
+      await cleanupPlexPlaylistsIfIdentityChanged(
+        req.user.id,
+        previousConnection,
+        "self",
+        identity.id,
+      );
 
       res.json({
         connected: true,
@@ -320,7 +350,7 @@ export function registerPlexLink(router) {
       }
       const serverToken = tokenResult.serverToken;
 
-      await cleanupPlexPlaylistsIfIdentityChanged(id, "managed", plexUserId);
+      const previousConnection = plexConnectionStore.getConnection(id);
 
       const saved = plexConnectionStore.saveConnection(id, {
         linkType: "managed",
@@ -331,6 +361,12 @@ export function registerPlexLink(router) {
         plexUsername: plexUsername || null,
         linkedByAdminId: req.user.id,
       });
+      await cleanupPlexPlaylistsIfIdentityChanged(
+        id,
+        previousConnection,
+        "managed",
+        plexUserId,
+      );
       res.json({
         connected: true,
         linkType: saved.linkType,
